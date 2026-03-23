@@ -4,7 +4,7 @@
 
 <p align="center">
 <a href="https://arxiv.org/abs/xxxx.xxxxx"><img alt="Paper" src="https://img.shields.io/badge/Paper-AdaEdit-b31b1b.svg"></a>
-<a href="https://github.com/yourusername/AdaEdit"><img src="https://img.shields.io/static/v1?label=GitHub&message=repository&color=green"></a>
+<a href="https://github.com/leeguandong/AdaEdit"><img src="https://img.shields.io/static/v1?label=GitHub&message=repository&color=green"></a>
 </p>
 
 <p align="center">
@@ -15,41 +15,41 @@
 
 ## Abstract
 
-**AdaEdit** 是一个**免训练**的自适应图像编辑框架，专为基于流模型（Flow Models）的图像编辑设计。我们通过两个核心创新解决了反演编辑中的"注入困境"：
+**AdaEdit** is a **training-free** adaptive image editing framework designed for Flow-based diffusion models. We address the "injection dilemma" in inversion-based editing through two core innovations:
 
-**(1) 渐进式注入调度（Progressive Injection Schedule）**：用连续衰减函数（sigmoid/cosine/linear）替代二值截断，消除特征不连续性，降低超参数敏感度。
+**(1) Progressive Injection Schedule**: Replaces binary truncation with continuous decay functions (sigmoid/cosine/linear), eliminating feature discontinuities and reducing hyperparameter sensitivity.
 
-**(2) 通道选择性潜在扰动（Channel-Selective Latent Perturbation）**：基于通道重要性估计，对编辑相关通道施加强扰动，对结构通道保持弱扰动，在保持结构保真度的同时实现有效编辑。
+**(2) Channel-Selective Latent Perturbation**: Applies strong perturbations to edit-relevant channels while maintaining weak perturbations on structural channels based on channel importance estimation, achieving effective editing while preserving structural fidelity.
 
-在 PIE-Bench 基准测试（700张图片）上，AdaEdit 相比基线方法实现了显著改进：
-- **LPIPS ↓ 8.7%**（背景保持）
-- **SSIM ↑ 2.6%**（结构相似度）
-- **PSNR ↑ 2.3%**（峰值信噪比）
-- **CLIP ≈ -0.9%**（编辑准确性几乎无损）
+On PIE-Bench (700 images), AdaEdit achieves significant improvements over baseline methods:
+- **LPIPS ↓ 8.7%** (background preservation)
+- **SSIM ↑ 2.6%** (structural similarity)
+- **PSNR ↑ 2.3%** (peak signal-to-noise ratio)
+- **CLIP ≈ -0.9%** (editing accuracy nearly lossless)
 
 ## Installation
 
 ```bash
-# 克隆仓库
-git clone https://github.com/yourusername/AdaEdit.git
+# Clone repository
+git clone https://github.com/leeguandong/AdaEdit.git
 cd AdaEdit
 
-# 安装依赖
+# Install dependencies
 pip install -r requirements.txt
 ```
 
-## 模型下载
+## Model Download
 
-下载 FLUX.1-dev 模型权重并放置到 `checkpoints/` 目录：
+Download FLUX.1-dev model weights and place them in the `checkpoints/` directory:
 
 ```bash
-# 下载 FLUX.1-dev 模型
+# Download FLUX.1-dev model
 huggingface-cli download black-forest-labs/FLUX.1-dev --local-dir checkpoints/flux-dev
 ```
 
 ## Usage
 
-### 基础用法
+### Basic Usage
 
 ```bash
 python adaedit.py \
@@ -59,7 +59,7 @@ python adaedit.py \
     --output_dir outputs/
 ```
 
-### 完整参数
+### Full Parameters
 
 ```bash
 python adaedit.py \
@@ -79,30 +79,30 @@ python adaedit.py \
     --seed 42
 ```
 
-### 参数说明
+### Parameters
 
-| 参数 | 简写 | 默认值 | 说明 |
-|------|------|--------|------|
-| `--source_img` | `-i` | **必需** | 源图像路径 |
-| `--source_prompt` | `-sp` | **必需** | 源图像描述 |
-| `--target_prompt` | `-tp` | **必需** | 目标编辑描述 |
-| `--output_dir` | `-o` | `outputs/` | 输出目录 |
-| `--edit_object` | | `""` | 编辑对象（用于mask提取） |
-| `--num_steps` | | `15` | 采样步数 |
-| `--guidance` | | `4.0` | 引导强度 |
-| `--inject` | | `4` | 注入步数阈值 |
-| `--inject_schedule` | | `sigmoid` | 注入调度类型：`binary`/`sigmoid`/`cosine`/`linear` |
-| `--kv_mix_ratio` | | `0.9` | KV-Mix 混合比例 |
-| `--ls_ratio` | | `0.25` | Latents-Shift 强度 |
-| `--use_channel_ls` | | `False` | 启用通道选择性 Latents-Shift |
-| `--channel_ls_temp` | | `1.0` | 通道重要性温度参数 |
-| `--seed` | | `0` | 随机种子（0=随机） |
-| `--offload` | | `False` | 低显存模式 |
+| Parameter | Short | Default | Description |
+|-----------|-------|---------|-------------|
+| `--source_img` | `-i` | **Required** | Source image path |
+| `--source_prompt` | `-sp` | **Required** | Source image description |
+| `--target_prompt` | `-tp` | **Required** | Target editing description |
+| `--output_dir` | `-o` | `outputs/` | Output directory |
+| `--edit_object` | | `""` | Object to edit (for mask extraction) |
+| `--num_steps` | | `15` | Number of sampling steps |
+| `--guidance` | | `4.0` | Guidance scale |
+| `--inject` | | `4` | Injection step threshold |
+| `--inject_schedule` | | `sigmoid` | Injection schedule: `binary`/`sigmoid`/`cosine`/`linear` |
+| `--kv_mix_ratio` | | `0.9` | KV-Mix ratio |
+| `--ls_ratio` | | `0.25` | Latents-Shift strength |
+| `--use_channel_ls` | | `False` | Enable channel-selective Latents-Shift |
+| `--channel_ls_temp` | | `1.0` | Channel importance temperature |
+| `--seed` | | `0` | Random seed (0=random) |
+| `--offload` | | `False` | Low VRAM mode |
 
-### 示例
+### Examples
 
 ```bash
-# 示例1：对象替换（使用渐进式sigmoid调度）
+# Example 1: Object replacement (with progressive sigmoid schedule)
 python adaedit.py \
     -i examples/cat.jpg \
     -sp "A photo of a cat on a sofa" \
@@ -111,7 +111,7 @@ python adaedit.py \
     --inject_schedule sigmoid \
     --use_channel_ls
 
-# 示例2：风格迁移（不使用Latents-Shift）
+# Example 2: Style transfer (without Latents-Shift)
 python adaedit.py \
     -i examples/portrait.jpg \
     -sp "A portrait photo" \
@@ -119,7 +119,7 @@ python adaedit.py \
     --edit_type style \
     --inject_schedule cosine
 
-# 示例3：低显存模式
+# Example 3: Low VRAM mode
 python adaedit.py \
     -i examples/scene.jpg \
     -sp "A street scene" \
@@ -127,41 +127,41 @@ python adaedit.py \
     --offload
 ```
 
-## 核心特性
+## Key Features
 
-### 1. 渐进式注入调度
+### 1. Progressive Injection Schedule
 
-传统方法使用二值截断（前N步注入=1，后续步骤注入=0），导致特征不连续。AdaEdit 提供三种连续衰减函数：
+Traditional methods use binary truncation (first N steps inject=1, subsequent steps inject=0), causing feature discontinuities. AdaEdit provides three continuous decay functions:
 
-- **Sigmoid**（推荐）：平滑过渡，中等锐度
-- **Cosine**：余弦衰减，更平滑
-- **Linear**：线性衰减，最简单
+- **Sigmoid** (recommended): Smooth transition, moderate sharpness
+- **Cosine**: Cosine decay, smoother
+- **Linear**: Linear decay, simplest
 
-### 2. 通道选择性潜在扰动
+### 2. Channel-Selective Latent Perturbation
 
-不同通道编码不同信息（结构/颜色/纹理）。AdaEdit 自动估计每个通道的编辑相关性：
-- 编辑相关通道：强扰动（促进内容变化）
-- 结构通道：弱扰动（保持布局稳定）
+Different channels encode different information (structure/color/texture). AdaEdit automatically estimates the edit-relevance of each channel:
+- Edit-relevant channels: Strong perturbation (promotes content change)
+- Structural channels: Weak perturbation (maintains layout stability)
 
-### 3. 即插即用
+### 3. Plug-and-Play
 
-AdaEdit 无需训练，可与多种 ODE 求解器配合使用：
-- Euler（基础）
-- RF-Solver（二阶）
-- FireFlow（速度重用，推荐）
+AdaEdit is training-free and works with multiple ODE solvers:
+- Euler (basic)
+- RF-Solver (second-order)
+- FireFlow (velocity reuse, recommended)
 
 ## Python API
 
 ```python
-from adaedit import AdaEditPipeline
+from api import AdaEditPipeline
 
-# 初始化
+# Initialize
 pipeline = AdaEditPipeline(
     model_path="checkpoints/flux-dev",
     device="cuda"
 )
 
-# 编辑图像
+# Edit image
 result = pipeline.edit(
     source_image="source.jpg",
     source_prompt="A photo of a cat",
@@ -174,38 +174,38 @@ result = pipeline.edit(
     seed=42
 )
 
-# 保存结果
+# Save result
 result.save("output.jpg")
 ```
 
-## 技术细节
+## Technical Details
 
-### 渐进式注入权重计算
+### Progressive Injection Weight Calculation
 
 ```python
-# Sigmoid 调度
+# Sigmoid schedule
 w(t) = 1 / (1 + exp(k * (t/T_inj - 0.7)))
 
-# Cosine 调度
+# Cosine schedule
 w(t) = 0.5 * (1 + cos(π * t/T_inj))
 
-# Linear 调度
+# Linear schedule
 w(t) = max(1 - t/T_inj, 0)
 ```
 
-### 通道重要性估计
+### Channel Importance Estimation
 
 ```python
-# 计算每个通道的分布差异
+# Calculate distribution difference for each channel
 channel_diff = |mean(source_channel) - mean(random_channel)|
 
-# Softmax 归一化
+# Softmax normalization
 channel_weight = softmax(channel_diff / temperature) * num_channels
 ```
 
 ## Citation
 
-如果您在研究中使用了 AdaEdit，请引用我们的论文：
+If you use AdaEdit in your research, please cite our paper:
 
 ```bibtex
 @article{li2026adaedit,
@@ -218,10 +218,10 @@ channel_weight = softmax(channel_diff / temperature) * num_channels
 
 ## Acknowledgments
 
-- [FLUX.1](https://github.com/black-forest-labs/flux) - 基础流模型
-- [FireFlow](https://github.com/xxx/fireflow) - 高效 ODE 求解器
-- [PIE-Bench](https://github.com/xxx/pie-bench) - 评测基准
+- [FLUX.1](https://github.com/black-forest-labs/flux) - Base flow model
+- [FireFlow](https://github.com/xxx/fireflow) - Efficient ODE solver
+- [PIE-Bench](https://github.com/xxx/pie-bench) - Evaluation benchmark
 
 ## License
 
-本项目采用 MIT 许可证。详见 [LICENSE](LICENSE) 文件。
+This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
