@@ -5,13 +5,12 @@ import pickle
 import torch
 from einops import rearrange
 from huggingface_hub import hf_hub_download
-from imwatermark import WatermarkEncoder
 from safetensors.torch import load_file as load_sft
 
-from flux.model import Flux, FluxParams
-from flux.modules.autoencoder import AutoEncoder, AutoEncoderParams
-from flux.modules.conditioner import HFEmbedder
-from flux.sampling import unpack
+from .model import Flux, FluxParams
+from .modules.autoencoder import AutoEncoder, AutoEncoderParams
+from .modules.conditioner import HFEmbedder
+from .sampling import unpack
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 
@@ -131,12 +130,16 @@ def load_flow_model(name: str, device: str | torch.device = "cuda", hf_download:
 
 def load_t5(device: str | torch.device = "cuda", max_length: int = 512) -> HFEmbedder:
     # max length 64, 128, 256 and 512 should work (if your sequence is short enough)
-    t5_path = os.getenv("T5_PATH", "/dev_share/gdli7/models/t5-v1_1-xxl")
+    # Default: HF repo ID used by FLUX.1. Override with T5_PATH for a
+    # local checkpoint path.
+    t5_path = os.getenv("T5_PATH", "google/t5-v1_1-xxl")
     return HFEmbedder(t5_path, max_length=max_length, is_clip=False, torch_dtype=torch.bfloat16).to(device)
 
 
 def load_clip(device: str | torch.device = "cuda") -> HFEmbedder:
-    clip_path = os.getenv("CLIP_PATH", "/dev_share/gdli7/models/clip/clip-vit-large-patch14")
+    # Default: HF repo ID used by FLUX.1. Override with CLIP_PATH for a
+    # local checkpoint path.
+    clip_path = os.getenv("CLIP_PATH", "openai/clip-vit-large-patch14")
     return HFEmbedder(clip_path, max_length=77, is_clip=True, torch_dtype=torch.bfloat16).to(device)
 
 
@@ -177,6 +180,9 @@ def load_llm(model_name="Qwen/Qwen3-8B", device: str | torch.device = "cuda"):
 
 class WatermarkEmbedder:
     def __init__(self, watermark):
+        # lazy import: the `imwatermark` package is optional and only needed
+        # if a caller actually constructs a WatermarkEmbedder.
+        from imwatermark import WatermarkEncoder
         self.watermark = watermark
         self.num_bits = len(WATERMARK_BITS)
         self.encoder = WatermarkEncoder()
@@ -222,7 +228,9 @@ def save_velocity_distribution(info, prefix=""):
 WATERMARK_MESSAGE = 0b001010101111111010000111100111001111010100101110
 # bin(x)[2:] gives bits of x as str, use int to convert them to 0/1
 WATERMARK_BITS = [int(bit) for bit in bin(WATERMARK_MESSAGE)[2:]]
-embed_watermark = WatermarkEmbedder(WATERMARK_BITS)
+# NOTE: module-level instantiation removed — it triggered an eager
+# import of `imwatermark` (an optional dep) at import time. Call
+# `WatermarkEmbedder(WATERMARK_BITS)` explicitly if you need one.
 
 def search_sequence_torch(arr, seq):
     arr = torch.tensor(arr) if not isinstance(arr, torch.Tensor) else arr

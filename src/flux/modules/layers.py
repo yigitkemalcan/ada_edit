@@ -4,7 +4,7 @@ from dataclasses import dataclass
 import torch
 from einops import rearrange
 from torch import Tensor, nn
-from flux.math import attention, rope
+from ..math import attention, rope
 
 import os
 

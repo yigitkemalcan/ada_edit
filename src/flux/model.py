@@ -3,9 +3,9 @@ from dataclasses import dataclass
 import torch
 from torch import Tensor, nn
 
-from flux.modules.layers import (DoubleStreamBlock, EmbedND, LastLayer,
-                                 MLPEmbedder, SingleStreamBlock,
-                                 timestep_embedding)
+from .modules.layers import (DoubleStreamBlock, EmbedND, LastLayer,
+                              MLPEmbedder, SingleStreamBlock,
+                              timestep_embedding)
 
 
 @dataclass

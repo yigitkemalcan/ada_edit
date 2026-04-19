@@ -20,6 +20,15 @@ wheels/
 .installed.cfg
 *.egg
 
+# Virtual environments
+venv/
+.venv/
+env/
+.env/
+ENV/
+venv.*/
+pyvenv.cfg
+
 # PyTorch
 *.pth
 *.pt
@@ -31,11 +40,16 @@ checkpoints/
 
 # Outputs
 outputs/
+outputs_adaptive/
 results/
 features/
 *.jpg
 *.png
 *.jpeg
+
+# HuggingFace caches (if saved inside repo)
+.cache/
+huggingface/
 
 # IDE
 .vscode/
