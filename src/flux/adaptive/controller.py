@@ -149,11 +149,12 @@ def make_controller(
     Factory: returns None for modes that do not need a controller.
         - original          -> None (pure AdaEdit)
         - scheduled_fixed   -> None (alias for original)
+        - no_injection      -> None (KV-Mix fully disabled in runner)
         - fixed_soft        -> PDController with kp=kd=0 (constant base_alpha)
         - pd_adaptive       -> PDController
         - pid_adaptive      -> PIDController
     """
-    if mode in ("original", "scheduled_fixed"):
+    if mode in ("original", "scheduled_fixed", "no_injection"):
         return None
     if mode == "fixed_soft":
         return PDController(
@@ -186,6 +187,6 @@ def make_controller(
         )
     raise ValueError(
         f"Unknown adaptive mode: {mode!r}. "
-        "Expected one of: original, scheduled_fixed, fixed_soft, "
-        "pd_adaptive, pid_adaptive."
+        "Expected one of: original, scheduled_fixed, no_injection, "
+        "fixed_soft, pd_adaptive, pid_adaptive."
     )

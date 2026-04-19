@@ -62,6 +62,7 @@ ADAPTIVE_MODES = (
     "fixed_soft",
     "pd_adaptive",
     "pid_adaptive",
+    "no_injection",
 )
 
 
@@ -225,7 +226,20 @@ def run(args):
 
     drift_meter = DriftMeter(mode=args.drift_metric)
 
-    if args.mode in ("original", "scheduled_fixed") or controller is None:
+    if args.mode == "no_injection":
+        # Ablation: run target pass with KV-Mix fully disabled. The
+        # layers short-circuit to the no-injection attention path,
+        # so the edit proceeds with zero source-side preservation.
+        print("Phase 3: target pass — mode=no_injection (KV-Mix disabled)")
+        prev_kv_mix = info["kv_mix"]
+        info["kv_mix"] = False
+        x_out, info = denoise_fireflow(
+            model, **inp_target, timesteps=timesteps,
+            guidance=args.guidance, inverse=False, info=info,
+        )
+        info["kv_mix"] = prev_kv_mix
+        info.setdefault("adaptive_log", [])
+    elif args.mode in ("original", "scheduled_fixed") or controller is None:
         print(f"Phase 3: target pass — mode={args.mode} (original sampler)")
         x_out, info = denoise_fireflow(
             model, **inp_target, timesteps=timesteps,

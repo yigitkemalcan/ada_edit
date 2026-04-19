@@ -91,6 +91,7 @@ Selected via `--mode`:
 |------|------------|-----------|
 | `original` | none | Vanilla AdaEdit. Calls original sampler. |
 | `scheduled_fixed` | none | Alias of `original`. Kept for ablation. |
+| `no_injection` | none | Target pass runs with `info['kv_mix']=False`. KV-Mix is fully disabled, so there is no source-side preservation at all — useful as a floor baseline to show what injection is buying. |
 | `fixed_soft` | constant | Constant `alpha = base_alpha` (no feedback). A non-adaptive baseline between original and PD. |
 | `pd_adaptive` | PD | Our main proposed mode. |
 | `pid_adaptive` | PID | PD + clipped integral term. |
@@ -241,6 +242,7 @@ extraction and upsampled with nearest-neighbour to source resolution.
 
 | Mode | `w(i)` | Controller | Expected role |
 |------|--------|-----------|---------------|
+| `no_injection` | — | none | floor: what the edit prompt alone produces from the inverted latent, no preservation |
 | `original` | sigmoid | none | baseline |
 | `fixed_soft` | sigmoid | const | isolates "constant soft" vs feedback |
 | `pd_adaptive` | sigmoid | PD | main method |
