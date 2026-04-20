@@ -196,7 +196,7 @@ def main(args):
         torch.cuda.empty_cache()
         ae.decoder.to(x_out.device)
 
-    batch_x = unpack(x_out.float(), new_w, new_h)
+    batch_x = unpack(x_out.float(), new_h, new_w)
 
     # Save output
     for x in batch_x:

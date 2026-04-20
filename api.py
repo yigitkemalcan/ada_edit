@@ -212,7 +212,7 @@ class AdaEditPipeline:
             torch.cuda.empty_cache()
             self.ae.decoder.to(x_out.device)
 
-        batch_x = unpack(x_out.float(), new_w, new_h)
+        batch_x = unpack(x_out.float(), new_h, new_w)
         x = batch_x[0].unsqueeze(0)
 
         with torch.autocast(device_type=self.device.type, dtype=torch.bfloat16):

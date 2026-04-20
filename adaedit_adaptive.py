@@ -264,7 +264,7 @@ def run(args):
         torch.cuda.empty_cache()
         ae.decoder.to(x_out.device)
 
-    batch_x = unpack(x_out.float(), new_w, new_h)
+    batch_x = unpack(x_out.float(), new_h, new_w)
 
     run_name = args.run_name or f"{args.mode}_{args.inject_schedule}_inject{args.inject}"
     run_dir = _next_run_dir(args.output_dir, run_name)
