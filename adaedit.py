@@ -4,6 +4,7 @@ Main entry point for image editing.
 """
 import os
 import re
+import json
 import time
 import argparse
 from glob import iglob
@@ -245,6 +246,33 @@ def main(args):
             exif_data[ExifTags.Base.ImageDescription] = args.target_prompt
             img.save(fn, exif=exif_data, quality=95, subsampling=0)
             print(f"✓ Saved: {fn}")
+
+            if args.metrics:
+                try:
+                    from src.flux.adaptive.metrics import compute_metrics
+                    from adaedit_adaptive import _indices_to_pixel_mask
+                    pixel_mask = _indices_to_pixel_mask(
+                        info.get("indices", None),
+                        info["latent_h"], info["latent_w"],
+                        new_h, new_w,
+                    )
+                    metrics = compute_metrics(
+                        source=source_image,
+                        output=img,
+                        target_prompt=args.target_prompt,
+                        source_prompt=args.source_prompt,
+                        edit_mask=pixel_mask,
+                        device=device,
+                    )
+                    metrics_fn = fn.replace(".jpg", ".metrics.json")
+                    with open(metrics_fn, "w") as f:
+                        json.dump(metrics, f, indent=2)
+                    print("Metrics:")
+                    for k, v in metrics.items():
+                        print(f"  {k}: {v:.4f}")
+                    print(f"✓ Saved metrics: {metrics_fn}")
+                except Exception as e:
+                    print(f"Warning: metrics computation failed: {e}")
         else:
             print("✗ Image may contain NSFW content, not saved.")
 
@@ -311,6 +339,12 @@ if __name__ == "__main__":
                        help='Path to save cached features (default: features)')
     parser.add_argument('--offload', action='store_true',
                        help='Enable model offloading for low VRAM')
+
+    # Metrics
+    parser.add_argument('--metrics', action='store_true', default=True,
+                       help='Compute CLIP / LPIPS / SSIM / PSNR (default on)')
+    parser.add_argument('--no_metrics', dest='metrics', action='store_false',
+                       help='Disable metric computation')
 
     args = parser.parse_args()
     main(args)

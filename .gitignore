@@ -70,3 +70,6 @@ arxiv/
 *.pdf
 *.tex
 *.bib
+
+# Benchmark data (cloned PnPInversion / PIE-Bench assets)
+data/

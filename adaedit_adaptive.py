@@ -99,7 +99,7 @@ def _next_run_dir(root: str, run_name: str) -> str:
     return f"{base}_{i:03d}"
 
 
-def run(args):
+def run(args, *, t5=None, clip=None, model=None, ae=None, gt_mask=None):
     torch.set_grad_enabled(False)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -112,12 +112,15 @@ def run(args):
             f"Unknown model {args.name!r}. Choose from {list(configs.keys())}."
         )
 
-    # --- load models ------------------------------------------------
-    print("Loading models...")
-    t5 = load_t5(device, max_length=512)
-    clip = load_clip(device)
-    model = load_flow_model(args.name, device="cpu" if args.offload else device)
-    ae = load_ae(args.name, device="cpu" if args.offload else device)
+    # --- load models (skipped if pre-loaded models are passed in) ---
+    if any(m is None for m in (t5, clip, model, ae)):
+        print("Loading models...")
+        t5 = load_t5(device, max_length=512)
+        clip = load_clip(device)
+        model = load_flow_model(args.name, device="cpu" if args.offload else device)
+        ae = load_ae(args.name, device="cpu" if args.offload else device)
+    else:
+        print("Using pre-loaded models.")
     if args.offload:
         model.cpu()
         torch.cuda.empty_cache()
@@ -318,20 +321,26 @@ def run(args):
             json.dump(log_payload, f, indent=2)
         print(f"✓ Saved controller log: {log_fn}")
 
-    # --- optional metrics -------------------------------------------
+    # --- metrics (CLIP / LPIPS / SSIM / PSNR) -----------------------
     if args.metrics:
         try:
             from src.flux.adaptive.metrics import compute_metrics
 
-            pixel_mask = _indices_to_pixel_mask(
-                info.get("indices", None),
-                info["latent_h"], info["latent_w"],
-                new_h, new_w,
-            )
+            if gt_mask is not None:
+                pixel_mask = gt_mask
+            else:
+                pixel_mask = _indices_to_pixel_mask(
+                    info.get("indices", None),
+                    info["latent_h"], info["latent_w"],
+                    new_h, new_w,
+                )
             metrics = compute_metrics(
                 source=source_image,
                 output=img_out,
+                target_prompt=args.target_prompt,
+                source_prompt=args.source_prompt,
                 edit_mask=pixel_mask,
+                device=device,
             )
             metrics_fn = os.path.join(run_dir, "metrics.json")
             with open(metrics_fn, "w") as f:
@@ -421,8 +430,11 @@ def build_parser():
                    help="Write per-step controller+drift log JSON (default on)")
     p.add_argument("--no_log_controller", dest="log_controller",
                    action="store_false")
-    p.add_argument("--metrics", action="store_true",
-                   help="Compute lightweight bg-preservation / edit metrics")
+    p.add_argument("--metrics", action="store_true", default=True,
+                   help="Compute CLIP / LPIPS / SSIM / PSNR metrics "
+                        "(default on)")
+    p.add_argument("--no_metrics", dest="metrics", action="store_false",
+                   help="Disable metric computation")
 
     # system
     p.add_argument("--feature_path", default="features", type=str)
