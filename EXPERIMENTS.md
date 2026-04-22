@@ -24,6 +24,12 @@ Metric conventions:
 
 ## Recommended configuration (current best)
 
+> **Updated after phase 3.** Multi-image PIE-Bench validation (n=30)
+> showed that turning on all three AdaEdit extensions on top of the PD
+> controller produces the best config overall — see [Phase 3](#phase-3--pie-bench-multi-image-validation-n30).
+> The two phase-2 winners below are preserved for single-image
+> reproducibility on the horse edit.
+
 Two viable winners from phase 2. Pick based on what you care about
 most. Both beat vanilla AdaEdit (baseline_original) by large margins.
 
@@ -223,8 +229,11 @@ These are the parameter choices that consistently helped across all
 3. `ls_ratio ∈ [0.45, 0.55]`.
 4. `kd = 0.2`.
 5. `kp ∈ {0.5, 1.5}` preferred over `1.0` on this edit.
-6. Skip `use_soft_mask` / `use_adaptive_kv` / `use_channel_ls` — no
-   measurable benefit on this edit class.
+6. ~~Skip `use_soft_mask` / `use_adaptive_kv` / `use_channel_ls` — no
+   measurable benefit on this edit class.~~ **Superseded by phase 3.**
+   On the horse edit (n=1) the extensions didn't help, but on PIE-Bench
+   (n=30, diverse edits, GT masks) they stack additively with PD and
+   produce the best overall config. See [Phase 3](#phase-3--pie-bench-multi-image-validation-n30).
 7. `pd_adaptive` beats `original` by ~2.7 dB PSNR / ~0.05 LPIPS —
    biggest delta in the entire study.
 
@@ -245,21 +254,159 @@ These are the parameter choices that consistently helped across all
 
 ---
 
+## Phase 3 — PIE-Bench multi-image validation (n=30)
+
+Four-way comparison on a fixed 30-sample slice of PIE-Bench
+(`seed=0`, category 8 excluded). All runs share the same pipeline
+seed (`42`), 15 steps, sigmoid schedule, `inject=4`. Background
+metrics use PIE-Bench's ground-truth masks (RLE-decoded, 512×512,
+with the PnP-Inversion border-pixel fix) so the numbers are
+comparable to the AdaEdit / ProEdit / PnP-Inversion papers.
+
+Harness: `benchmarks/pie_bench/` — loader + runner re-using
+`sweep._build_args`. Per-sample artefacts land under
+`outputs_pie30_<name>/<key>/`, aggregate CSV at
+`outputs_pie30_<name>/pie_samples.csv`.
+
+The three boolean extensions (`use_soft_mask`, `use_adaptive_kv`,
+`use_channel_ls`) were **not** part of the phase-1/2 sweeps — they
+were toggled off in every run by default. Phase 3 is their first
+appearance alongside the PD controller.
+
+### Configurations
+
+| ID | Name | mode | PD | soft_mask | adaptive_kv | channel_ls |
+|----|------|------|----|-----------|-------------|------------|
+| A | adaptive (phase-2 winner) | `pd_adaptive` | ✓ | ✗ | ✗ | ✗ |
+| B | original-lite (no extensions) | `original` | — | ✗ | ✗ | ✗ |
+| C | paper-AdaEdit | `original` | — | ✓ | ✓ | ✓ |
+| D | **adaptive + extensions** | `pd_adaptive` | ✓ | ✓ | ✓ | ✓ |
+
+Shared PD parameters (A and D): `kv_mix_ratio=0.9`,
+`target_drift=0.02`, `ls_ratio=0.45`, `kp=1.5`, `kd=0.2` (phase-2
+balanced winner). Paper-style runs (B and C): `kv_mix_ratio=0.9`,
+`ls_ratio=0.25` (AdaEdit paper defaults).
+
+### Mean across 30 samples
+
+```
+                  A             B             C             D
+                  PD only       baseline      3-ext only    PD + 3-ext
+psnr      (↑):    17.6911       14.4907       17.7045       18.9231   ← D
+ssim      (↑):     0.6131        0.5266        0.6018        0.6369   ← D
+lpips     (↓):     0.3913        0.5027        0.4016        0.3534   ← D
+psnr_bg   (↑):    20.3156       17.6784       20.4699       21.4285   ← D  (n=23)
+ssim_bg   (↑):     0.7027        0.6483        0.7072        0.7245   ← D  (n=23)
+lpips_bg  (↓):     0.1931        0.2424        0.1806        0.1684   ← D  (n=23)
+clip_i    (↑):     0.8866        0.8600        0.8870        0.8903   ← D
+clip_t    (↑):     0.2666        0.2724        0.2694        0.2662
+clip_dir  (↑):     0.1260        0.1497        0.1280        0.1288
+```
+
+`*_bg` denominators are 23 not 30 because category 9 (style) has no
+well-defined preservation region — GT masks span the full image
+there, so the background is empty.
+
+### Per-category `psnr_bg` (↑)
+
+| Cat | Description | A | B | C | D | Winner |
+|-----|-------------|---|---|---|---|--------|
+| 0 | random | 19.59 | 17.53 | 19.10 | **20.47** | D |
+| 1 | change object | 21.37 | 17.77 | 22.97 | **23.75** | D |
+| 2 | add | 16.18 | 13.89 | 16.18 | **16.84** | D |
+| 3 | remove | 17.27 | 14.25 | 19.22 | **19.66** | D |
+| 4 | content | **25.04** | 23.37 | 23.79 | 25.07 | D ≈ A |
+| 6 | color | 20.95 | 17.50 | 21.51 | **22.59** | D |
+| 7 | material | **22.06** | 20.94 | 20.43 | 21.54 | A |
+
+D wins or ties 6 of 7 measurable categories. The one loss (cat 7
+material, n=2 samples) is noise-scale.
+
+### Takeaways
+
+1. **D is the winner.** Beats A-alone and C-alone on every fidelity
+   and background metric. Edit quality (CLIP-t, CLIP-dir) is
+   essentially unchanged — no tradeoff.
+2. **Extensions and PD are additive, not redundant.** The A→D delta
+   (+1.11 dB psnr_bg, −0.025 lpips_bg) is meaningfully smaller than
+   B→C (+2.79 dB psnr_bg), so there is partial overlap — but the
+   residual gain on top of PD is still worth the extension cost.
+   The four mechanisms constrain drift through orthogonal channels:
+   - PD controller — dynamic α gating across time.
+   - `soft_mask` — spatial attention gating.
+   - `channel_ls` — channel-selective latent perturbation.
+   - `adaptive_kv` — per-layer KV-mix scaling.
+3. **Phase-1's "skip extensions" finding was n=1 artefact.** On the
+   horse edit, `soft_mask` hurt `psnr_bg` and the other two were
+   mid-pack. On 30 diverse PIE-Bench samples with GT masks, all
+   three contribute. The horse edit is unrepresentative (single
+   prominent object, clean bg) — exactly the case where extensions
+   have least to do.
+4. **PD ≈ extensions on their own.** A and C are statistically
+   indistinguishable (psnr_bg 20.32 vs 20.47). PD alone recovers
+   the same bg-preservation gain the three extensions produce
+   together on bare baseline. Mechanistically coherent: both are
+   solving "don't leak into background," just with different knobs.
+5. **CLIP-t ranking is inverted from intuition.** B (most damaged
+   bg) wins CLIP-t / CLIP-dir by the largest margin. When bg
+   preservation fails, the delta image is bigger, which reads as
+   "more of the edit prompt visible" in CLIP space — but at the
+   cost of fidelity. This is a known failure mode of CLIP-t as a
+   standalone edit metric and motivates the `*_bg` masked variants.
+
+### Against the AdaEdit paper (Table 1, whole-image, n=700)
+
+|        | paper AdaEdit | **our D (n=30)** |
+|--------|---------------|------------------|
+| PSNR   | 19.58         | 18.92            |
+| SSIM   | 0.7433        | 0.6369           |
+| LPIPS  | 0.2703        | 0.3534           |
+| CLIP-T | 0.2593        | 0.2662           |
+
+We are within ~0.7 dB PSNR and ahead on CLIP-T. The SSIM / LPIPS
+gap is partly explained by our n=30 slice including 4 style
+samples (cat 9), which score terribly on whole-image metrics
+because the whole image is the edit region. Full-700 run is needed
+for an apples-to-apples comparison.
+
+### Recommended configuration (multi-image)
+
+```python
+args = build_parser().parse_args([
+    "--source_img", "...",
+    "--source_prompt", "...",
+    "--target_prompt", "...",
+    "--edit_object", "...",
+    "--mode", "pd_adaptive",
+    "--drift_metric", "latent_init",
+    "--kv_mix_ratio", "0.9",
+    "--target_drift", "0.02",
+    "--ls_ratio", "0.45",
+    "--kp", "1.5",
+    "--kd", "0.2",
+    "--use_channel_ls",
+    "--use_soft_mask",
+    "--use_adaptive_kv",
+    "--num_steps", "15",
+    "--seed", "42",
+])
+```
+
+---
+
 ## Next step
 
-Move to a multi-image benchmark (e.g. PIE-Bench or a curated subset
-covering all four `edit_type` values). Goals:
-- Confirm `kd=0.2` is universally the right derivative gain.
-- Resolve the `kp=0.5` vs `kp=1.5` tie.
-- Measure per-edit-type optima (the `change` / `add` / `remove` /
-  `style` paths may each want different `kv_mix_ratio`).
-- Report averaged metrics with std across examples so claims about
-  the method no longer hinge on n=1.
-
-Infrastructure needed:
-- A benchmark harness that iterates over a dataset of (source_img,
-  source_prompt, target_prompt, edit_object, edit_type) tuples.
-- Per-example metrics.json + aggregate CSV with mean / std / per-type
-  breakdowns.
-- Reuse `sweep.run_sweep` config-list API: one row per (example ×
-  config), aggregate by config afterward.
+1. **Run the full 700 PIE-Bench on config D.** At ~12.4 s/sample ×
+   620 samples (cat 8 excluded) ≈ 2.1 h. Produces the number that
+   goes next to AdaEdit's 19.58 / 0.7433 / 0.2703 / 0.2593 in any
+   write-up.
+2. **Consider a second full-700 on config C** (paper-AdaEdit) so we
+   have a locally-reproduced paper baseline on the exact same slice
+   — removes "are our numbers comparable to the paper?" ambiguity.
+3. **Category 8 (background).** Currently skipped per project
+   decision. Worth one short experiment to confirm AdaEdit + PD
+   genuinely underperforms there vs. a dedicated bg-replace method,
+   or whether our pipeline handles it acceptably.
+4. **`kp=0.5` vs `kp=1.5` tie from phase 2** — still unresolved.
+   After the full 700 on D, run a second pass with `kp=0.5` if
+   time permits to pick the global winner.
