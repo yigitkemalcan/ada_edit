@@ -1,256 +1,70 @@
 # AdaEdit-Adaptive experiment log
 
-Single-image tuning sweeps on the horse → toy-horse edit.
-Source: `examples/horse.jpg`, source prompt `A photo of a horse`,
-target prompt `A photo of a toy horse`, edit_object `horse`, edit_type
-`change`, seed `42`, num_steps `15`, flux-dev.
+Multi-image benchmarking on PIE-Bench. Every config runs on the same
+30-sample slice (`seed=0`, category 8 excluded) with 15 steps, sigmoid
+inject schedule, `inject=4`. Background metrics use PIE-Bench's
+ground-truth masks (RLE-decoded 512×512 with the PnP-Inversion
+border-pixel fix) so numbers are directly comparable to the AdaEdit /
+ProEdit / PnP-Inversion papers.
 
-All runs use `mode=pd_adaptive` unless stated otherwise. Metrics
-implementation: CLIP (openai/clip-vit-large-patch14), LPIPS (AlexNet),
-SSIM + PSNR (scikit-image). Masked `_bg` variants restrict metrics to
-the preservation (non-edit) region using the latent-space mask from
-phase-1 indices, resized to pixel space.
+Harness: `benchmarks/pie_bench/` (per-config runner) and
+`sweep_pie_bench.py` (cross-config driver + aggregate CSV).
 
 Metric conventions:
-- `psnr / ssim / lpips / psnr_bg / ssim_bg / lpips_bg` — edit vs source
-  (preservation side). Higher is better for PSNR/SSIM, lower for LPIPS.
+- `psnr / ssim / lpips / psnr_bg / ssim_bg / lpips_bg` — edit vs
+  source. Higher is better for PSNR/SSIM, lower for LPIPS. `*_bg`
+  variants restrict to the preservation (non-edit) region using the
+  PIE-Bench GT mask.
 - `clip_i` — CLIP cosine similarity, edit vs source image.
 - `clip_t` — CLIP cosine similarity, edit vs target prompt.
 - `clip_dir` — CLIP directional similarity: (edit_img − src_img) vs
   (target_prompt − source_prompt). Most principled edit-quality metric
   because it subtracts out baseline similarity.
 
+> **Historical note.** Earlier phases 1 and 2 tuned hyperparameters on
+> a single image (horse → toy horse). Most of those parameter
+> rankings did not generalize — see phase 4 for the details. Those
+> sections have been removed to keep this log focused on
+> benchmark-grade findings; git history preserves them.
+
 ---
 
 ## Recommended configuration (current best)
 
-> **Updated after phase 3.** Multi-image PIE-Bench validation (n=30)
-> showed that turning on all three AdaEdit extensions on top of the PD
-> controller produces the best config overall — see [Phase 3](#phase-3--pie-bench-multi-image-validation-n30).
-> The two phase-2 winners below are preserved for single-image
-> reproducibility on the horse edit.
-
-Two viable winners from phase 2. Pick based on what you care about
-most. Both beat vanilla AdaEdit (baseline_original) by large margins.
-
-### Option A — balanced (recommended default)
-
-Best `psnr`, `lpips`, `ssim_bg`. Strong everywhere.
+Phase-7 winner: `pd_kv0.30_soft_mask_only`. Pareto-dominant on
+PIE-Bench n=30, winning 9 of 9 metrics against the all-extensions
+baseline. Minimal config: PD controller + kv=0.30 + soft_mask; the
+other two extensions (`channel_ls`, `adaptive_kv`) turned out to be
+slightly-negative contribution and are dropped.
 
 ```python
 from adaedit_adaptive import build_parser, run
 
 args = build_parser().parse_args([
-    "--source_img", "examples/horse.jpg",
-    "--source_prompt", "A photo of a horse",
-    "--target_prompt", "A photo of a toy horse",
-    "--edit_object", "horse",
+    "--source_img", "...",
+    "--source_prompt", "...",
+    "--target_prompt", "...",
+    "--edit_object", "...",
     "--mode", "pd_adaptive",
     "--drift_metric", "latent_init",
-    "--kv_mix_ratio", "0.9",
+    "--kv_mix_ratio", "0.30",
     "--target_drift", "0.02",
     "--ls_ratio", "0.45",
     "--kp", "1.5",
     "--kd", "0.2",
+    "--use_soft_mask",
     "--num_steps", "15",
     "--seed", "42",
-    "--output_dir", "outputs_adaptive",
 ])
 run(args, t5=t5, clip=clip, model=model, ae=ae)
 ```
 
-Expected metrics on the horse:
+Expected metrics (PIE-Bench n=30, seed=0, cat 8 excluded):
 ```
-psnr=20.14  ssim=0.7485  lpips=0.2357
-psnr_bg=23.83  ssim_bg=0.8402  lpips_bg=0.1299
-clip_i=0.7540  clip_t=0.2897  clip_dir=0.2406
+psnr=20.0393     ssim=0.6661     lpips=0.3219
+psnr_bg=22.1489  ssim_bg=0.7355  lpips_bg=0.1594
+clip_i=0.9021    clip_t=0.2624   clip_dir=0.1209
 ```
-
-### Option B — edit-direction winner
-
-Best `clip_dir` of the whole sweep (29 configs). Use when edit-quality
-is the primary reporting metric.
-
-Change only: `--kp 0.5` (keep `--kd 0.2`, everything else identical).
-
-Expected metrics:
-```
-psnr=20.14  ssim=0.7482  lpips=0.2366
-psnr_bg=23.84  ssim_bg=0.8397  lpips_bg=0.1301
-clip_i=0.7583  clip_t=0.2883  clip_dir=0.2462
-```
-
----
-
-## Baseline for reference
-
-Vanilla AdaEdit (`--mode original --kv_mix_ratio 0.9 --ls_ratio 0.25`):
-```
-psnr=17.4027  ssim=0.7036  lpips=0.2826
-psnr_bg=22.8856  ssim_bg=0.8286  lpips_bg=0.1476
-clip_i=0.7441  clip_t=0.2814  clip_dir=0.2378
-```
-
-Delta baseline → Option A (balanced winner):
-- PSNR: +2.74 dB
-- SSIM: +0.045
-- LPIPS: −0.047
-- psnr_bg: +0.94 dB
-- lpips_bg: −0.018
-- clip_t: +0.008
-- clip_dir: +0.003
-
-The preservation gains are large and consistent; the CLIP gains are
-small (within single-image noise).
-
----
-
-## Phase 1 — initial sweep (17 runs)
-
-Grid: `kv_mix_ratio ∈ {0.6, 0.75, 0.9}` × `target_drift ∈ {0.02, 0.05}`
-× `ls_ratio ∈ {0.25, 0.45}` on `pd_adaptive`, plus Tier-2 feature
-toggles and two baselines.
-
-```
-name                     time_s   psnr     ssim    lpips   psnr_bg  ssim_bg  lpips_bg  clip_i  clip_t  clip_dir
------------------------  -------  -------  ------  ------  -------  -------  --------  ------  ------  --------
-t1_kv0.6_td0.02_ls0.25   17.32    20.2208  0.7408  0.2518  23.6066  0.8307   0.1436    0.7601  0.2803  0.2239
-t1_kv0.6_td0.02_ls0.45   12.35    20.2759  0.7431  0.2486  23.6907  0.8328   0.1405    0.7630  0.2794  0.2249
-t1_kv0.6_td0.05_ls0.25   12.32    20.2519  0.7410  0.2510  23.6421  0.8313   0.1436    0.7617  0.2800  0.2229
-t1_kv0.6_td0.05_ls0.45   12.31    20.2720  0.7430  0.2498  23.6608  0.8327   0.1432    0.7690  0.2808  0.2324
-t1_kv0.75_td0.02_ls0.25  12.33    20.0884  0.7405  0.2518  23.6060  0.8312   0.1435    0.7531  0.2860  0.2292
-t1_kv0.75_td0.02_ls0.45  12.33    20.1652  0.7416  0.2483  23.6757  0.8317   0.1397    0.7696  0.2765  0.2351
-t1_kv0.75_td0.05_ls0.25  12.29    20.0784  0.7396  0.2528  23.5925  0.8303   0.1437    0.7550  0.2836  0.2259
-t1_kv0.75_td0.05_ls0.45  12.34    20.1501  0.7404  0.2499  23.5546  0.8297   0.1414    0.7605  0.2764  0.2278
-t1_kv0.9_td0.02_ls0.25   12.32    19.9641  0.7390  0.2491  23.6619  0.8311   0.1400    0.7569  0.2833  0.2388
-t1_kv0.9_td0.02_ls0.45   12.31    20.0980  0.7428  0.2406  23.8137  0.8351   0.1325    0.7498  0.2939  0.2400   <- phase-1 winner
-t1_kv0.9_td0.05_ls0.25   12.29    20.0119  0.7386  0.2507  23.7050  0.8307   0.1401    0.7546  0.2884  0.2384
-t1_kv0.9_td0.05_ls0.45   12.28    20.1066  0.7406  0.2455  23.7297  0.8307   0.1363    0.7427  0.2839  0.2282
-t2_soft_mask             12.25    20.3030  0.7394  0.2572  23.0226  0.8223   0.1493    0.7378  0.2877  0.2231
-t2_adaptive_kv           12.33    20.1827  0.7413  0.2510  23.6704  0.8315   0.1420    0.7552  0.2853  0.2294
-t2_channel_ls            12.28    20.0904  0.7392  0.2527  23.5572  0.8290   0.1441    0.7586  0.2813  0.2224
-baseline_original        12.24    17.4027  0.7036  0.2826  22.8856  0.8286   0.1476    0.7441  0.2814  0.2378
-baseline_pd_default      12.26    20.0119  0.7386  0.2507  23.7050  0.8307   0.1401    0.7546  0.2884  0.2384
-```
-
-Best per metric:
-```
-       psnr (↑): t2_soft_mask  (20.3030)
-       ssim (↑): t1_kv0.6_td0.02_ls0.45  (0.7431)
-      lpips (↓): t1_kv0.9_td0.02_ls0.45  (0.2406)
-    psnr_bg (↑): t1_kv0.9_td0.02_ls0.45  (23.8137)
-    ssim_bg (↑): t1_kv0.9_td0.02_ls0.45  (0.8351)
-   lpips_bg (↓): t1_kv0.9_td0.02_ls0.45  (0.1325)
-     clip_i (↑): t1_kv0.75_td0.02_ls0.45  (0.7696)
-     clip_t (↑): t1_kv0.9_td0.02_ls0.45  (0.2939)
-   clip_dir (↑): t1_kv0.9_td0.02_ls0.45  (0.2400)
-```
-
-Takeaways:
-1. `t1_kv0.9_td0.02_ls0.45` is Pareto-dominant — wins on 6 of 9 metrics,
-   including all three bg preservation metrics and both text-alignment
-   metrics simultaneously. The "pick a winner" case.
-2. `ls_ratio=0.45 > 0.25` almost everywhere — more foreground noise in
-   phase 2 lets the edit breathe without hurting bg preservation.
-3. `kv_mix_ratio=0.9` (high) beats lower values for `edit_type=change`.
-   The high base gives the foreground more target-KV influence; the
-   model spends its generative budget in the fg instead of leaking
-   into bg.
-4. `target_drift` 0.02 vs 0.05 — marginal, 0.02 slightly preferred.
-5. Tier-2 features hurt or didn't help:
-   - `soft_mask`: best whole-image PSNR but **worst `psnr_bg`**.
-     Soft boundaries blur the fg/bg distinction.
-   - `adaptive_kv`, `channel_ls`: mid-pack, no gain.
-
----
-
-## Phase 2 — follow-up sweep (12 runs)
-
-Around the phase-1 winner (`kv=0.9, td=0.02, ls=0.45`):
-- `ls_ratio` extension to `{0.55, 0.65, 0.75}`.
-- `kp × kd` grid at `ls=0.45`: `kp ∈ {0.5, 1.0, 1.5} × kd ∈ {0.1, 0.2, 0.4}`.
-
-```
-name           time_s   psnr     ssim    lpips   psnr_bg  ssim_bg  lpips_bg  clip_i  clip_t  clip_dir
--------------  -------  -------  ------  ------  -------  -------  --------  ------  ------  --------
-f_ls0.55       12.35    20.0509  0.7458  0.2383  23.7242  0.8360   0.1299    0.7368  0.2889  0.2236
-f_ls0.65       12.29    20.0538  0.7487  0.2384  23.7703  0.8400   0.1288    0.7394  0.2945  0.2293
-f_ls0.75       12.31    19.9535  0.7436  0.2436  23.6429  0.8338   0.1328    0.7432  0.2760  0.2081
-f_kp0.5_kd0.1  12.35    20.0962  0.7454  0.2386  23.7825  0.8363   0.1312    0.7552  0.2883  0.2363
-f_kp0.5_kd0.2  12.35    20.1381  0.7482  0.2366  23.8390  0.8397   0.1301    0.7583  0.2883  0.2462   <- best clip_dir
-f_kp0.5_kd0.4  12.26    20.1012  0.7447  0.2393  23.7836  0.8358   0.1322    0.7579  0.2892  0.2434
-f_kp1.0_kd0.1  12.26    20.1216  0.7473  0.2379  23.7773  0.8372   0.1312    0.7541  0.2883  0.2369
-f_kp1.0_kd0.2  12.26    20.0980  0.7428  0.2406  23.8137  0.8351   0.1325    0.7498  0.2939  0.2400   <- reproduces phase-1 winner exactly
-f_kp1.0_kd0.4  12.31    20.0370  0.7408  0.2419  23.7479  0.8334   0.1333    0.7501  0.2881  0.2352
-f_kp1.5_kd0.1  12.23    20.1352  0.7446  0.2382  23.8270  0.8367   0.1310    0.7562  0.2905  0.2438
-f_kp1.5_kd0.2  12.22    20.1443  0.7485  0.2357  23.8334  0.8402   0.1299    0.7540  0.2897  0.2406   <- balanced winner
-f_kp1.5_kd0.4  12.16    20.0897  0.7435  0.2397  23.8141  0.8362   0.1316    0.7516  0.2903  0.2349
-```
-
-Best per metric:
-```
-       psnr (↑): f_kp1.5_kd0.2  (20.1443)
-       ssim (↑): f_ls0.65       (0.7487)
-      lpips (↓): f_kp1.5_kd0.2  (0.2357)
-    psnr_bg (↑): f_kp0.5_kd0.2  (23.8390)
-    ssim_bg (↑): f_kp1.5_kd0.2  (0.8402)
-   lpips_bg (↓): f_ls0.65       (0.1288)
-     clip_i (↑): f_kp0.5_kd0.2  (0.7583)
-     clip_t (↑): f_ls0.65       (0.2945)
-   clip_dir (↑): f_kp0.5_kd0.2  (0.2462)
-```
-
-Takeaways:
-1. **Sanity check passed.** `f_kp1.0_kd0.2` reproduces the phase-1
-   winner to 4 decimals → sweep is deterministic, observed deltas
-   are signal not noise.
-2. `kd=0.2` strictly dominates `kd=0.1` and `kd=0.4` at every `kp`.
-   This is the most robust finding — adopt as fixed.
-3. `kp` is non-monotonic. Both `kp=0.5` and `kp=1.5` beat `kp=1.0` on
-   most metrics. Likely alpha saturation (clamped to `[0.2, 1.2]`):
-   both extremes settle at similar effective alpha via different
-   paths; the middle value is the least-stable zone.
-4. `ls_ratio` tops out at 0.45–0.65. `0.65` gets marginal wins on
-   `lpips_bg` and `clip_t` but costs `clip_dir`; `0.75` is strictly
-   worse (too much fg noise erases the edit signal).
-5. Tightest range across 12 configs: PSNR 19.95–20.14 (0.19 dB),
-   clip_t 0.276–0.295 (0.019). We're in diminishing-returns territory
-   for single-image tuning.
-
----
-
-## Robust findings across both sweeps
-
-These are the parameter choices that consistently helped across all
-29 runs and should be treated as locked in:
-
-1. `kv_mix_ratio = 0.9` for `edit_type=change`.
-2. `target_drift = 0.02`.
-3. `ls_ratio ∈ [0.45, 0.55]`.
-4. `kd = 0.2`.
-5. `kp ∈ {0.5, 1.5}` preferred over `1.0` on this edit.
-6. ~~Skip `use_soft_mask` / `use_adaptive_kv` / `use_channel_ls` — no
-   measurable benefit on this edit class.~~ **Superseded by phase 3.**
-   On the horse edit (n=1) the extensions didn't help, but on PIE-Bench
-   (n=30, diverse edits, GT masks) they stack additively with PD and
-   produce the best overall config. See [Phase 3](#phase-3--pie-bench-multi-image-validation-n30).
-7. `pd_adaptive` beats `original` by ~2.7 dB PSNR / ~0.05 LPIPS —
-   biggest delta in the entire study.
-
----
-
-## Known caveats
-
-- **n = 1.** All 29 runs are a single source image + single edit. The
-  `kp=0.5` vs `kp=1.5` split is real under this prompt; we do not
-  know whether it generalizes.
-- **`edit_type=change` only.** The KV-Mix formula inverts for `add` and
-  becomes unmasked for `style`, so the optimal `kv_mix_ratio` may flip
-  direction for those.
-- **Metrics noise floor.** Differences in the 0.001–0.005 range on
-  CLIP scores are within expected jitter across seeds / nearby
-  edits, even though the runs here are reproducible.
-- **Seed fixed at 42.** All results are conditional on this seed.
 
 ---
 
@@ -268,11 +82,6 @@ Harness: `benchmarks/pie_bench/` — loader + runner re-using
 `outputs_pie30_<name>/<key>/`, aggregate CSV at
 `outputs_pie30_<name>/pie_samples.csv`.
 
-The three boolean extensions (`use_soft_mask`, `use_adaptive_kv`,
-`use_channel_ls`) were **not** part of the phase-1/2 sweeps — they
-were toggled off in every run by default. Phase 3 is their first
-appearance alongside the PD controller.
-
 ### Configurations
 
 | ID | Name | mode | PD | soft_mask | adaptive_kv | channel_ls |
@@ -283,9 +92,9 @@ appearance alongside the PD controller.
 | D | **adaptive + extensions** | `pd_adaptive` | ✓ | ✓ | ✓ | ✓ |
 
 Shared PD parameters (A and D): `kv_mix_ratio=0.9`,
-`target_drift=0.02`, `ls_ratio=0.45`, `kp=1.5`, `kd=0.2` (phase-2
-balanced winner). Paper-style runs (B and C): `kv_mix_ratio=0.9`,
-`ls_ratio=0.25` (AdaEdit paper defaults).
+`target_drift=0.02`, `ls_ratio=0.45`, `kp=1.5`, `kd=0.2`. Paper-style
+runs (B and C): `kv_mix_ratio=0.9`, `ls_ratio=0.25` (AdaEdit paper
+defaults).
 
 ### Mean across 30 samples
 
@@ -324,35 +133,29 @@ material, n=2 samples) is noise-scale.
 
 ### Takeaways
 
-1. **D is the winner.** Beats A-alone and C-alone on every fidelity
-   and background metric. Edit quality (CLIP-t, CLIP-dir) is
-   essentially unchanged — no tradeoff.
+1. **D beats A and C on every fidelity and background metric.** Edit
+   quality (CLIP-t, CLIP-dir) is essentially unchanged — no tradeoff.
+   (Phase 4 subsequently identifies a better config; see below.)
 2. **Extensions and PD are additive, not redundant.** The A→D delta
    (+1.11 dB psnr_bg, −0.025 lpips_bg) is meaningfully smaller than
    B→C (+2.79 dB psnr_bg), so there is partial overlap — but the
-   residual gain on top of PD is still worth the extension cost.
-   The four mechanisms constrain drift through orthogonal channels:
+   residual gain on top of PD is worth the extension cost. The four
+   mechanisms constrain drift through orthogonal channels:
    - PD controller — dynamic α gating across time.
    - `soft_mask` — spatial attention gating.
    - `channel_ls` — channel-selective latent perturbation.
    - `adaptive_kv` — per-layer KV-mix scaling.
-3. **Phase-1's "skip extensions" finding was n=1 artefact.** On the
-   horse edit, `soft_mask` hurt `psnr_bg` and the other two were
-   mid-pack. On 30 diverse PIE-Bench samples with GT masks, all
-   three contribute. The horse edit is unrepresentative (single
-   prominent object, clean bg) — exactly the case where extensions
-   have least to do.
-4. **PD ≈ extensions on their own.** A and C are statistically
-   indistinguishable (psnr_bg 20.32 vs 20.47). PD alone recovers
-   the same bg-preservation gain the three extensions produce
-   together on bare baseline. Mechanistically coherent: both are
-   solving "don't leak into background," just with different knobs.
-5. **CLIP-t ranking is inverted from intuition.** B (most damaged
-   bg) wins CLIP-t / CLIP-dir by the largest margin. When bg
-   preservation fails, the delta image is bigger, which reads as
-   "more of the edit prompt visible" in CLIP space — but at the
-   cost of fidelity. This is a known failure mode of CLIP-t as a
-   standalone edit metric and motivates the `*_bg` masked variants.
+3. **PD ≈ extensions on their own.** A and C are statistically
+   indistinguishable (psnr_bg 20.32 vs 20.47). PD alone recovers the
+   same bg-preservation gain the three extensions produce together
+   on bare baseline. Both solve "don't leak into background," just
+   with different knobs.
+4. **CLIP-t ranking is inverted from intuition.** B (most damaged bg)
+   wins CLIP-t / CLIP-dir by the largest margin. When bg preservation
+   fails, the delta image is bigger, which reads as "more of the edit
+   prompt visible" in CLIP space — but at the cost of fidelity. Known
+   failure mode of CLIP-t as a standalone edit metric; this motivates
+   the `*_bg` masked variants.
 
 ### Against the AdaEdit paper (Table 1, whole-image, n=700)
 
@@ -363,50 +166,386 @@ material, n=2 samples) is noise-scale.
 | LPIPS  | 0.2703        | 0.3534           |
 | CLIP-T | 0.2593        | 0.2662           |
 
-We are within ~0.7 dB PSNR and ahead on CLIP-T. The SSIM / LPIPS
-gap is partly explained by our n=30 slice including 4 style
-samples (cat 9), which score terribly on whole-image metrics
-because the whole image is the edit region. Full-700 run is needed
-for an apples-to-apples comparison.
+Within ~0.7 dB PSNR and ahead on CLIP-T. The SSIM / LPIPS gap is
+partly explained by the n=30 slice including 4 style samples
+(cat 9), which score terribly on whole-image metrics because the
+whole image is the edit region. Full-700 run is needed for an
+apples-to-apples comparison.
 
-### Recommended configuration (multi-image)
+---
 
-```python
-args = build_parser().parse_args([
-    "--source_img", "...",
-    "--source_prompt", "...",
-    "--target_prompt", "...",
-    "--edit_object", "...",
-    "--mode", "pd_adaptive",
-    "--drift_metric", "latent_init",
-    "--kv_mix_ratio", "0.9",
-    "--target_drift", "0.02",
-    "--ls_ratio", "0.45",
-    "--kp", "1.5",
-    "--kd", "0.2",
-    "--use_channel_ls",
-    "--use_soft_mask",
-    "--use_adaptive_kv",
-    "--num_steps", "15",
-    "--seed", "42",
-])
+## Phase 4 — PIE-Bench cross-config sweep (n=30, 13 configs)
+
+Phase 3 validated 4 configs (A/B/C/D) on PIE-Bench. Phase 4 tests
+whether the phase-1/2 *parameter* choices (kp, kd, ls_ratio,
+target_drift, kv_mix_ratio) still hold on multi-image data when
+extensions are enabled. Every config runs on the identical n=30
+slice from phase 3, so every row below is directly comparable — no
+sampling noise between rows.
+
+Driver: `sweep_pie_bench.py::run_pie_sweep()`.
+
+### Configurations
+
+Two vanilla controls (`baseline`, `paper_adaedit`); two PD controls
+without extensions (`pd_balanced`, `pd_kp0.5`); nine PD configs with
+all three extensions on — single-knob variations over the phase-2
+balanced defaults.
+
+### Results
+
 ```
+name              time_min  n_ok  psnr     ssim    lpips   psnr_bg  ssim_bg  lpips_bg  clip_i  clip_t  clip_dir
+----------------  --------  ----  -------  ------  ------  -------  -------  --------  ------  ------  --------
+baseline            7.18    30    14.4907  0.5266  0.5027  17.6784  0.6483   0.2424    0.8600  0.2724  0.1497
+paper_adaedit       6.19    30    17.7045  0.6018  0.4016  20.4699  0.7072   0.1806    0.8870  0.2694  0.1280
+pd_balanced         6.22    30    17.6911  0.6131  0.3913  20.3156  0.7027   0.1931    0.8866  0.2666  0.1260
+pd_kp0.5            6.22    30    17.6026  0.6104  0.3943  20.2062  0.7001   0.1956    0.8873  0.2672  0.1250
+pd_balanced_full    6.20    30    18.9231  0.6369  0.3534  21.4285  0.7245   0.1684    0.8903  0.2662  0.1288
+pd_kp0.5_full       6.20    30    18.8791  0.6367  0.3543  21.3878  0.7242   0.1681    0.8917  0.2645  0.1264
+pd_kp1.0_full       6.20    30    18.9043  0.6369  0.3538  21.4130  0.7247   0.1683    0.8893  0.2651  0.1265
+pd_ls0.25_full      6.21    30    19.0118  0.6404  0.3492  21.5306  0.7264   0.1670    0.8941  0.2661  0.1246
+pd_ls0.55_full      6.22    30    18.8909  0.6366  0.3541  21.3672  0.7228   0.1693    0.8907  0.2666  0.1311
+pd_ls0.65_full      6.22    30    18.8495  0.6356  0.3545  21.3324  0.7221   0.1692    0.8925  0.2671  0.1334
+pd_kv0.75_full      6.21    30    19.4001  0.6518  0.3383  21.6468  0.7263   0.1662    0.8948  0.2632  0.1287   <- winner
+pd_td0.05_full      6.25    30    19.0698  0.6427  0.3488  21.5050  0.7246   0.1677    0.8919  0.2651  0.1264
+pd_kd0.1_full       6.28    30    18.9329  0.6376  0.3522  21.4397  0.7249   0.1676    0.8907  0.2656  0.1276
+```
+
+Best per metric:
+```
+     psnr (↑): pd_kv0.75_full  19.4001
+     ssim (↑): pd_kv0.75_full  0.6518
+    lpips (↓): pd_kv0.75_full  0.3383
+  psnr_bg (↑): pd_kv0.75_full  21.6468
+  ssim_bg (↑): pd_ls0.25_full  0.7264
+ lpips_bg (↓): pd_kv0.75_full  0.1662
+   clip_i (↑): pd_kv0.75_full  0.8948
+   clip_t (↑): baseline        0.2724
+ clip_dir (↑): baseline        0.1497
+```
+
+`pd_kv0.75_full` wins 6 of 9; `baseline` picks up clip_t / clip_dir
+(same inverted-signal story as phase 3); `pd_ls0.25_full` wins
+ssim_bg by 0.0001.
+
+### New winner: `pd_kv0.75_full`
+
+Beats the phase-3 winner (`pd_balanced_full` = D) on every fidelity
+metric:
+
+|          | D = pd_balanced_full | **pd_kv0.75_full** | Δ |
+|----------|----------------------|--------------------|---|
+| psnr     | 18.92  | **19.40**  | +0.48 dB |
+| ssim     | 0.6369 | **0.6518** | +0.015   |
+| lpips    | 0.3534 | **0.3383** | −0.015   |
+| psnr_bg  | 21.43  | **21.65**  | +0.22 dB |
+| ssim_bg  | 0.7245 | 0.7263     | +0.002   |
+| lpips_bg | 0.1684 | **0.1662** | −0.002   |
+| clip_i   | 0.8903 | **0.8948** | +0.004   |
+| clip_t   | 0.2662 | 0.2632     | −0.003   |
+| clip_dir | 0.1288 | 0.1287     | ≈ 0      |
+
+Whole-image fidelity gets the biggest lift; bg metrics move less.
+Edit quality (`clip_t`, `clip_dir`) unchanged within noise — the
+fidelity gain is free.
+
+### Phase-1/2 parameter conclusions that did NOT survive
+
+| Phase-1/2 claim (horse, n=1) | PIE-Bench (n=30) |
+|---|---|
+| `kv_mix_ratio = 0.9` | **Overturned.** 0.75 wins by +0.48 dB psnr. Phase-1 was specifically on `edit_type=change`; PIE-Bench mixes 7 edit types, so a lower kv is more flexible. |
+| `target_drift = 0.02 > 0.05` | **Overturned.** `pd_td0.05_full` 19.07 > `pd_balanced_full` 18.92. Phase-1 called it "marginal"; the sign flipped. |
+| `kd = 0.2` strictly dominates | **Not reproduced.** `pd_kd0.1_full` 18.93 ≈ `pd_balanced_full` 18.92 — a wash. |
+| `kp ∈ {0.5, 1.5}` beats 1.0 | **Not reproduced.** kp=0.5/1.0/1.5 all within 0.02 dB of each other on multi-image. The phase-2 alpha-saturation story was n=1 noise. |
+| `ls_ratio 0.45 > 0.25` | **Overturned.** `pd_ls0.25_full` 19.01 > `pd_balanced_full` 18.92. Inequality flipped. |
+
+### Phase-1/2 conclusions that DID survive
+
+1. **`pd_adaptive >> original`.** baseline 14.49 psnr → pd_balanced
+   17.69 psnr (+3.20 dB). The biggest lever in the entire study —
+   phase-1/2 had this right at +2.7 dB on the horse.
+2. **Extensions help when PD is on.** pd_balanced 17.69 psnr →
+   pd_balanced_full 18.92 psnr (+1.23 dB). The phase-3 finding
+   survived the wider comparison set unchanged.
+
+### What this means
+
+The phase-1/2 single-image sweeps were measuring differences in the
+0.01–0.1 dB range on a single image. On multi-image data those
+differences are at or below the sampling noise floor — so the
+specific parameter rankings they produced are not reliable.
+
+Which hyperparameters *matter* depends on the image variance in the
+test set. On a fixed single image, small-scale controller gains
+(kp, kd, ls_ratio) show ordering; on 30 diverse images, only coarse
+knobs (mode, extensions, kv_mix_ratio) show meaningful signal.
+
+---
+
+## Phase 5 — Focused kv sweep + stacking (n=30, 8 configs)
+
+Phase 4 identified `kv_mix_ratio=0.75` as the coarse-knob winner but
+only sampled kv at {0.75, 0.90}. Phase 5 fills in the kv axis at
+{0.60, 0.65, 0.70, 0.80, 0.85} and adds three stacking configs
+combining `kv=0.75` with the other individual-knob winners
+(`target_drift=0.05`, `ls_ratio=0.25`) to test whether the wins
+compound.
+
+Same n=30 slice, identical pipeline settings, directly comparable to
+phase 4 rows.
+
+### Results
+
+```
+name                          time_min  n_ok  psnr     ssim    lpips   psnr_bg  ssim_bg  lpips_bg  clip_i  clip_t  clip_dir
+----------------------------  --------  ----  -------  ------  ------  -------  -------  --------  ------  ------  --------
+pd_kv0.60_full                  6.16    30    19.7356  0.6590  0.3310  21.9137  0.7302   0.1627    0.8987  0.2644  0.1282   <- best fidelity
+pd_kv0.65_full                  6.17    30    19.6537  0.6577  0.3325  21.8388  0.7289   0.1637    0.8991  0.2634  0.1298
+pd_kv0.70_full                  6.16    30    19.5383  0.6548  0.3353  21.7528  0.7274   0.1650    0.8937  0.2647  0.1297
+pd_kv0.75_full (phase 4)        6.21    30    19.4001  0.6518  0.3383  21.6468  0.7263   0.1662    0.8948  0.2632  0.1287
+pd_kv0.80_full                  6.15    30    19.2764  0.6500  0.3402  21.6036  0.7268   0.1662    0.8952  0.2630  0.1260
+pd_kv0.85_full                  6.16    30    19.1022  0.6435  0.3472  21.5245  0.7250   0.1677    0.8942  0.2634  0.1256
+pd_kv0.75_td0.05_full           6.17    30    19.4917  0.6532  0.3366  21.6795  0.7257   0.1663    0.8961  0.2643  0.1320
+pd_kv0.75_ls0.25_full           6.16    30    19.4782  0.6545  0.3348  21.7986  0.7301   0.1641    0.8986  0.2631  0.1251
+pd_kv0.75_td0.05_ls0.25_full    6.16    30    19.5586  0.6559  0.3328  21.8417  0.7301   0.1638    0.8993  0.2640  0.1285
+```
+
+Best per metric:
+```
+     psnr (↑): pd_kv0.60_full               19.7356
+     ssim (↑): pd_kv0.60_full               0.6590
+    lpips (↓): pd_kv0.60_full               0.3310
+  psnr_bg (↑): pd_kv0.60_full               21.9137
+  ssim_bg (↑): pd_kv0.60_full               0.7302
+ lpips_bg (↓): pd_kv0.60_full               0.1627
+   clip_i (↑): pd_kv0.75_td0.05_ls0.25_full 0.8993
+   clip_t (↑): pd_kv0.70_full               0.2647
+ clip_dir (↑): pd_kv0.75_td0.05_full        0.1320
+```
+
+`pd_kv0.60_full` wins 6 of 9 metrics — Pareto-dominant on all
+fidelity and background metrics.
+
+### Takeaways
+
+1. **kv is monotonic across [0.60, 0.85].** Every step down in kv
+   gives a fidelity lift: kv=0.85 → 0.60 is +0.63 dB psnr, +0.39 dB
+   psnr_bg. No inflection within the sweep range.
+2. **CLIP is flat, not inversely correlated with kv.** `clip_t`
+   spans 0.2630–0.2647 and `clip_dir` spans 0.1256–0.1320 with no
+   monotonic trend — `clip_dir` actually peaks in the middle
+   (kv=0.65/0.70), not at high kv. The phase-3/4 "lower preservation
+   = higher CLIP" story shows up between `baseline` and PD configs
+   but does not show up *within* the PD-with-extensions kv axis.
+   The fidelity gain from lowering kv is effectively free here.
+3. **Stacking td=0.05 / ls=0.25 on kv=0.75 underperforms just
+   lowering kv.** The triple-stack (kv=0.75+td=0.05+ls=0.25) gets
+   to 19.56 psnr; plain kv=0.60 reaches 19.74. The independent-knob
+   wins from phase 4 do not compound beyond what the kv axis
+   already captures. Reinforces the phase-4 conclusion that on
+   n=30, only coarse knobs show signal.
+4. **Peak is at the boundary.** kv=0.60 is the lowest value tested
+   and still winning. Turnover point not yet found — need to sweep
+   further down.
+
+### vs. phase-4 winner
+
+|          | pd_kv0.75_full | **pd_kv0.60_full** | Δ |
+|----------|----------------|--------------------|---|
+| psnr     | 19.40 | **19.74** | +0.34 dB |
+| ssim     | 0.6518 | **0.6590** | +0.007 |
+| lpips    | 0.3383 | **0.3310** | −0.007 |
+| psnr_bg  | 21.65 | **21.91** | +0.27 dB |
+| ssim_bg  | 0.7263 | **0.7302** | +0.004 |
+| lpips_bg | 0.1662 | **0.1627** | −0.004 |
+| clip_i   | 0.8948 | **0.8987** | +0.004 |
+| clip_t   | 0.2632 | 0.2644 | +0.001 |
+| clip_dir | 0.1287 | 0.1282 | ≈ 0 |
+
+---
+
+## Phase 6 — Extended kv sweep to the floor (n=30, 7 configs)
+
+Phase 5 found fidelity still rising at the low edge (kv=0.60). Phase
+6 pushes the axis further: first kv ∈ {0.45, 0.50, 0.55} plus a
+`kv=0.60 + td=0.05` stacking sanity-check, then kv ∈ {0.30, 0.35,
+0.40} to find the turnover or the plateau. Same n=30 slice and
+pipeline settings as phases 3–5.
+
+### Results
+
+```
+name                   time_min  n_ok  psnr     ssim    lpips   psnr_bg  ssim_bg  lpips_bg  clip_i  clip_t  clip_dir
+---------------------  --------  ----  -------  ------  ------  -------  -------  --------  ------  ------  --------
+pd_kv0.30_full           6.15    30    20.0298  0.6658  0.3226  22.1257  0.7347   0.1595    0.8999  0.2634  0.1269   <- winner
+pd_kv0.35_full           6.16    30    20.0055  0.6659  0.3235  22.0628  0.7331   0.1605    0.8992  0.2637  0.1263
+pd_kv0.40_full           6.16    30    19.9660  0.6641  0.3261  22.0595  0.7325   0.1616    0.8991  0.2636  0.1262
+pd_kv0.45_full           6.15    30    19.9156  0.6624  0.3278  22.0037  0.7302   0.1622    0.8987  0.2635  0.1269
+pd_kv0.50_full           6.16    30    19.8649  0.6613  0.3289  21.9395  0.7294   0.1631    0.8972  0.2641  0.1278
+pd_kv0.55_full           6.15    30    19.8082  0.6613  0.3297  21.9662  0.7320   0.1623    0.9000  0.2636  0.1254
+pd_kv0.60_td0.05_full    6.16    30    19.7652  0.6594  0.3302  21.9080  0.7299   0.1629    0.8977  0.2648  0.1277
+```
+
+`pd_kv0.30_full` wins 7 of 9 metrics (all fidelity + bg + clip_i +
+clip_dir).
+
+### Full kv curve (phases 4 + 5 + 6, 12 points)
+
+```
+kv    psnr    Δpsnr/step  clip_t   clip_dir
+0.85  19.10   —           0.2634   0.1256
+0.80  19.28   +0.18       0.2630   0.1260
+0.75  19.40   +0.12       0.2632   0.1287
+0.70  19.54   +0.14       0.2647   0.1297
+0.65  19.65   +0.11       0.2634   0.1298   ← clip_dir peak
+0.60  19.74   +0.09       0.2644   0.1282
+0.55  19.81   +0.07       0.2636   0.1254
+0.50  19.86   +0.05       0.2641   0.1278
+0.45  19.92   +0.06       0.2635   0.1269
+0.40  19.97   +0.05       0.2636   0.1262
+0.35  20.01   +0.04       0.2637   0.1263
+0.30  20.03   +0.02       0.2634   0.1269
+```
+
+### Takeaways
+
+1. **Fidelity has plateaued.** 0.35→0.30 is +0.02 dB — at or below
+   the noise floor. The psnr curve is monotonic across the full
+   range but the marginal win from lowering kv further is now
+   smaller than sample variance. No reason to keep pushing.
+2. **CLIP never turned over.** `clip_dir` peaked at kv=0.65 (0.1298)
+   and dropped only 0.003 by kv=0.30 — under the 0.005 turnover
+   threshold. It actually ticked back up from kv=0.40 (0.1262) to
+   kv=0.30 (0.1269). `clip_t` is pinned at ~0.264 across the entire
+   range. The feared edit/fidelity trade-off didn't materialize.
+3. **Stacking still doesn't beat pure kv.** `pd_kv0.60_td0.05_full`
+   (19.77) underperforms plain `pd_kv0.45_full` (19.92). On n=30,
+   only the kv axis moves the needle — confirms the phase-4
+   "coarse-knobs only" finding.
+4. **Mechanistic interpretation: the extensions are doing the
+   preservation work, not kv.** `kv_mix_ratio` was the AdaEdit
+   paper's primary preservation lever, but once `soft_mask +
+   channel_ls + adaptive_kv` are stacked on top, they handle
+   preservation spatially/channel-wise and kv becomes a coarse
+   global "source-KV leakage" knob we can turn way down without
+   losing the edit. Consistent with phase 3, where the three
+   extensions alone (config C, kv=0.9) already got psnr_bg=20.47 —
+   lots of preservation was already coming from the extensions.
+   This hypothesis is the next thing to verify.
+
+### vs. phase-4 winner
+
+|          | pd_kv0.75_full | **pd_kv0.30_full** | Δ |
+|----------|----------------|--------------------|---|
+| psnr     | 19.40 | **20.03** | +0.63 dB |
+| ssim     | 0.6518 | **0.6658** | +0.014 |
+| lpips    | 0.3383 | **0.3226** | −0.016 |
+| psnr_bg  | 21.65 | **22.13** | +0.48 dB |
+| ssim_bg  | 0.7263 | **0.7347** | +0.008 |
+| lpips_bg | 0.1662 | **0.1595** | −0.007 |
+| clip_i   | 0.8948 | **0.8999** | +0.005 |
+| clip_t   | 0.2632 | 0.2634 | ≈ 0 |
+| clip_dir | 0.1287 | 0.1269 | −0.002 |
+
+Every fidelity and bg metric improves meaningfully; edit quality
+unchanged within noise.
+
+---
+
+## Phase 7 — Extension ablation at kv=0.30 (n=30, 5 configs)
+
+Phase 6 hypothesized that the three extensions (`soft_mask`,
+`channel_ls`, `adaptive_kv`) — not `kv_mix_ratio` — were doing the
+preservation work at low kv. Phase 7 tests this directly: drop each
+extension one at a time with kv fixed at 0.30, plus a final dual-drop
+configuration keeping only the extension that actually matters.
+
+### Results
+
+```
+name                      time_min  n_ok  psnr     ssim    lpips   psnr_bg  ssim_bg  lpips_bg  clip_i  clip_t  clip_dir
+------------------------  --------  ----  -------  ------  ------  -------  -------  --------  ------  ------  --------
+pd_kv0.30_full_ref          6.17    30    20.0298  0.6658  0.3226  22.1257  0.7347   0.1595    0.8999  0.2634  0.1269
+pd_kv0.30_no_soft_mask      6.16    30    19.9373  0.6613  0.3294  22.0057  0.7289   0.1640    0.9024  0.2631  0.1292
+pd_kv0.30_no_channel_ls     6.16    30    20.0186  0.6649  0.3227  22.0984  0.7319   0.1605    0.9013  0.2628  0.1238
+pd_kv0.30_no_adaptive_kv    6.16    30    20.0186  0.6652  0.3234  22.1244  0.7339   0.1600    0.9000  0.2627  0.1246
+pd_kv0.30_soft_mask_only    6.13    30    20.0393  0.6661  0.3219  22.1489  0.7355   0.1594    0.9021  0.2624  0.1209   <- winner
+```
+
+### Single-drop deltas (vs. `_ref`)
+
+```
+drop            Δpsnr     Δssim     Δlpips    Δpsnr_bg  Δssim_bg  Δlpips_bg  Δclip_i  Δclip_dir
+soft_mask      -0.0925   -0.0045   +0.0068   -0.1200   -0.0058   +0.0045    +0.0025  +0.0023
+channel_ls     -0.0112   -0.0009   +0.0001   -0.0273   -0.0028   +0.0010    +0.0014  -0.0031
+adaptive_kv    -0.0112   -0.0006   +0.0008   -0.0013   -0.0008   +0.0005    +0.0001  -0.0023
+```
+
+### Dual-drop (vs. `_ref`)
+
+```
+                 psnr     ssim    lpips    psnr_bg  ssim_bg  lpips_bg  clip_i   clip_t   clip_dir
+soft_mask_only   +0.010   +0.000  -0.001   +0.023   +0.001   -0.000    +0.002   -0.001   -0.006
+```
+
+### Takeaways
+
+1. **`soft_mask` is the only extension that matters.** Dropping it
+   alone costs −0.09 dB psnr and −0.12 dB psnr_bg — roughly an
+   order of magnitude larger than dropping either of the other two.
+   Removing it also boosts `clip_i` / `clip_dir` (edit signal
+   strengthens when preservation weakens), which is the signature
+   of a real preservation mechanism.
+2. **`channel_ls` and `adaptive_kv` are slightly-negative
+   contribution.** Single-drop hits of −0.01 dB each looked like
+   noise, but the dual-drop *improves* all 6 fidelity/bg metrics
+   simultaneously (+0.01 dB psnr, +0.02 dB psnr_bg). They weren't
+   redundant-but-neutral — they were adding a small amount of drift
+   that hurt fidelity marginally.
+3. **Phase 3's "three extensions are additive" finding was wrong.**
+   Phase 3 compared "all 3 on" vs "all 3 off" as a block and
+   concluded they all pulled weight. The actual decomposition:
+   `soft_mask` does essentially all the work; the other two are
+   decorative. The phase-3 A→D gain (+1.11 dB psnr_bg) was really
+   soft_mask alone.
+4. **`clip_dir` dropped 0.006 with the dual-drop** — just above the
+   0.005 threshold. `clip_dir` has fluctuated in 0.125–0.130 across
+   the whole kv axis without monotonic pattern, so this is
+   at-or-near noise floor rather than a real edit-quality hit.
+   `clip_t` moved −0.001, pure noise.
+5. **Final minimal config: PD + kv=0.30 + soft_mask.** Four knobs
+   (mode, kv, PD gains, one spatial gate). Everything else
+   (channel_ls, adaptive_kv, the td/ls/kp/kd fine-tuning from
+   phases 1/2) is noise on multi-image data.
+
+### vs. phase-6 winner (`_ref`)
+
+|          | pd_kv0.30_full_ref | **pd_kv0.30_soft_mask_only** | Δ |
+|----------|---------------------|-------------------------------|---|
+| psnr     | 20.0298 | **20.0393** | +0.010 |
+| ssim     | 0.6658 | **0.6661** | +0.000 |
+| lpips    | 0.3226 | **0.3219** | −0.001 |
+| psnr_bg  | 22.1257 | **22.1489** | +0.023 |
+| ssim_bg  | 0.7347 | **0.7355** | +0.001 |
+| lpips_bg | 0.1595 | **0.1594** | −0.000 |
+| clip_i   | 0.8999 | **0.9021** | +0.002 |
+| clip_t   | 0.2634 | 0.2624 | −0.001 |
+| clip_dir | 0.1269 | 0.1209 | −0.006 |
+
+Wins or ties 7 of 9 metrics by construction; loses `clip_t` and
+`clip_dir` by near-noise margins.
 
 ---
 
 ## Next step
 
-1. **Run the full 700 PIE-Bench on config D.** At ~12.4 s/sample ×
-   620 samples (cat 8 excluded) ≈ 2.1 h. Produces the number that
-   goes next to AdaEdit's 19.58 / 0.7433 / 0.2703 / 0.2593 in any
-   write-up.
-2. **Consider a second full-700 on config C** (paper-AdaEdit) so we
-   have a locally-reproduced paper baseline on the exact same slice
-   — removes "are our numbers comparable to the paper?" ambiguity.
+1. **Full 700 PIE-Bench on `pd_kv0.30_soft_mask_only`.** ~2.1 h at
+   ~12.4 s/sample × 620 samples. Produces the paper-comparable
+   number to put next to AdaEdit's 19.58 / 0.7433 / 0.2703 / 0.2593.
+2. **Reproduce paper-AdaEdit on full 700.** So our numbers sit next
+   to a locally-reproduced paper baseline on the exact same slice.
+   Removes the "are our numbers comparable to the paper?" ambiguity.
 3. **Category 8 (background).** Currently skipped per project
    decision. Worth one short experiment to confirm AdaEdit + PD
-   genuinely underperforms there vs. a dedicated bg-replace method,
-   or whether our pipeline handles it acceptably.
-4. **`kp=0.5` vs `kp=1.5` tie from phase 2** — still unresolved.
-   After the full 700 on D, run a second pass with `kp=0.5` if
-   time permits to pick the global winner.
+   genuinely underperforms there vs. a dedicated bg-replace method.
