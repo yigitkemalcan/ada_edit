@@ -38,10 +38,14 @@ from __future__ import annotations
 import json
 import os
 import random
+import re
 from dataclasses import dataclass
 from typing import Dict, Iterator, List, Optional
 
 import numpy as np
+
+
+_BRACKET_RE = re.compile(r"\[([^\]]+)\]")
 
 
 # Collapse PIE-Bench's 10 editing_type_id values onto AdaEdit's 4 buckets.
@@ -131,13 +135,48 @@ def _strip_brackets(p: str) -> str:
     return p.replace("[", "").replace("]", "")
 
 
-def _parse_blended_word(bw: str) -> str:
-    """blended_word is 'src_word tgt_word'. We need the source word for
-    cross-attention mask extraction in AdaEdit."""
-    if not bw:
-        return ""
-    parts = bw.strip().split()
-    return parts[0] if parts else ""
+def _last_word(text: str) -> str:
+    """Last non-empty alphanumeric word of a string (brackets stripped)."""
+    stripped = _strip_brackets(text)
+    tokens = re.findall(r"[A-Za-z][A-Za-z0-9'-]*", stripped)
+    return tokens[-1] if tokens else ""
+
+
+def _derive_edit_object(
+    blended_word: str,
+    original_prompt: str,
+    editing_prompt: str,
+) -> str:
+    """
+    Return an edit-object word that can be found in the (unbracketed)
+    source prompt. AdaEdit's mask extraction tokenizes this against the
+    source prompt — if it is empty or absent the whole Phase-1 inversion
+    crashes on an IndexError in layers.py:289.
+
+    Priority:
+      1. First whitespace-separated token of ``blended_word``
+         (what PIE-Bench populates for ~78% of entries).
+      2. Last word of the bracketed span in ``original_prompt``
+         (change-object / remove-object edits annotate the target word
+         this way even when blended_word is blank).
+      3. Last content word of the unbracketed source prompt
+         (add / style edits have no source-side bracket, so we pick the
+         most salient noun — the final token of the source prompt —
+         to give the cross-attn mask *something* to anchor on).
+    """
+    bw = blended_word.strip() if blended_word else ""
+    if bw:
+        tokens = re.findall(r"[A-Za-z][A-Za-z0-9'-]*", bw)
+        if tokens:
+            return tokens[0]
+
+    src_brackets = _BRACKET_RE.findall(original_prompt or "")
+    if src_brackets:
+        w = _last_word(src_brackets[-1])
+        if w:
+            return w
+
+    return _last_word(original_prompt or editing_prompt or "")
 
 
 def load_sample(
@@ -154,7 +193,11 @@ def load_sample(
         image_path=image_path,
         source_prompt=_strip_brackets(item["original_prompt"]),
         target_prompt=_strip_brackets(item["editing_prompt"]),
-        edit_object=_parse_blended_word(item.get("blended_word", "")),
+        edit_object=_derive_edit_object(
+            item.get("blended_word", ""),
+            item.get("original_prompt", ""),
+            item.get("editing_prompt", ""),
+        ),
         edit_type=PIE_BENCH_TO_ADAEDIT.get(type_id, "change"),
         mask=mask,
         blended_word=item.get("blended_word", ""),
