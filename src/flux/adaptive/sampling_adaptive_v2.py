@@ -123,7 +123,8 @@ def _prep_step_common(info, num_steps: int):
     if not torch.is_tensor(indices):
         indices = None
     soft_mask = info.get("soft_mask", None)
-    return inject_weights, base_kv, indices, soft_mask
+    source_traj = info.get("source_trajectory", None)
+    return inject_weights, base_kv, indices, soft_mask, source_traj
 
 
 # -----------------------------------------------------------------------------
@@ -149,7 +150,7 @@ def denoise_fireflow_scheduled(
     guidance: float = 4.0,
 ):
     num_steps = len(timesteps[:-1])
-    inject_weights, base_kv, indices, soft_mask = _prep_step_common(info, num_steps)
+    inject_weights, base_kv, indices, soft_mask, source_traj = _prep_step_common(info, num_steps)
     guidance_vec = torch.full(
         (img.shape[0],), guidance, device=img.device, dtype=img.dtype
     )
@@ -161,7 +162,8 @@ def denoise_fireflow_scheduled(
 
     for i, (t_curr, t_prev) in enumerate(zip(timesteps[:-1], timesteps[1:])):
         drift_val = drift_meter.update(
-            img=img, z_init=z_init, indices=indices, soft_mask=soft_mask
+            img=img, z_init=z_init, indices=indices, soft_mask=soft_mask,
+            step_idx=i, source_traj=source_traj,
         )
         alpha_t = controller.step(drift_val, step_idx=i)
         w_i = float(inject_weights[i])
@@ -227,7 +229,7 @@ def denoise_fireflow_two_phase(
     transition; controller _prev_error is cleared at the boundary.
     """
     num_steps = len(timesteps[:-1])
-    inject_weights, _, indices, soft_mask = _prep_step_common(info, num_steps)
+    inject_weights, _, indices, soft_mask, source_traj = _prep_step_common(info, num_steps)
     guidance_vec = torch.full(
         (img.shape[0],), guidance, device=img.device, dtype=img.dtype
     )
@@ -243,7 +245,8 @@ def denoise_fireflow_two_phase(
 
     for i, (t_curr, t_prev) in enumerate(zip(timesteps[:-1], timesteps[1:])):
         drift_val = drift_meter.update(
-            img=img, z_init=z_init, indices=indices, soft_mask=soft_mask
+            img=img, z_init=z_init, indices=indices, soft_mask=soft_mask,
+            step_idx=i, source_traj=source_traj,
         )
 
         if i < boundary:
@@ -318,7 +321,7 @@ def denoise_fireflow_dual(
     guidance: float = 4.0,
 ):
     num_steps = len(timesteps[:-1])
-    inject_weights, base_kv, indices, soft_mask = _prep_step_common(info, num_steps)
+    inject_weights, base_kv, indices, soft_mask, source_traj = _prep_step_common(info, num_steps)
     guidance_vec = torch.full(
         (img.shape[0],), guidance, device=img.device, dtype=img.dtype
     )
@@ -331,7 +334,8 @@ def denoise_fireflow_dual(
 
     for i, (t_curr, t_prev) in enumerate(zip(timesteps[:-1], timesteps[1:])):
         d_pres = drift_meter.update(
-            img=img, z_init=z_init, indices=indices, soft_mask=soft_mask
+            img=img, z_init=z_init, indices=indices, soft_mask=soft_mask,
+            step_idx=i, source_traj=source_traj,
         )
         d_edit = edit_meter.update(
             img=img,
@@ -408,7 +412,7 @@ def denoise_fireflow_asymmetric(
         )
 
     num_steps = len(timesteps[:-1])
-    inject_weights, _, indices, soft_mask = _prep_step_common(info, num_steps)
+    inject_weights, _, indices, soft_mask, source_traj = _prep_step_common(info, num_steps)
     guidance_vec = torch.full(
         (img.shape[0],), guidance, device=img.device, dtype=img.dtype
     )
@@ -420,7 +424,8 @@ def denoise_fireflow_asymmetric(
 
     for i, (t_curr, t_prev) in enumerate(zip(timesteps[:-1], timesteps[1:])):
         d_pres = drift_meter.update(
-            img=img, z_init=z_init, indices=indices, soft_mask=soft_mask
+            img=img, z_init=z_init, indices=indices, soft_mask=soft_mask,
+            step_idx=i, source_traj=source_traj,
         )
         alpha_t = controller.step(d_pres)
         w_i = float(inject_weights[i])
@@ -494,7 +499,7 @@ def denoise_fireflow_xattn(
     release_factor for that step.
     """
     num_steps = len(timesteps[:-1])
-    inject_weights, base_kv, indices, soft_mask = _prep_step_common(info, num_steps)
+    inject_weights, base_kv, indices, soft_mask, source_traj = _prep_step_common(info, num_steps)
     guidance_vec = torch.full(
         (img.shape[0],), guidance, device=img.device, dtype=img.dtype
     )
@@ -510,7 +515,8 @@ def denoise_fireflow_xattn(
 
     for i, (t_curr, t_prev) in enumerate(zip(timesteps[:-1], timesteps[1:])):
         d_pres = drift_meter.update(
-            img=img, z_init=z_init, indices=indices, soft_mask=soft_mask
+            img=img, z_init=z_init, indices=indices, soft_mask=soft_mask,
+            step_idx=i, source_traj=source_traj,
         )
         alpha_t = controller.step(d_pres)
 

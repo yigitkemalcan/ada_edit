@@ -238,8 +238,12 @@ def denoise_fireflow(
     guidance_vec = torch.full((img.shape[0],), guidance, device=img.device, dtype=img.dtype)
 
     step_list = []
+    record_traj = bool(info.get('record_source_trajectory', False))
+    traj: list = [] if record_traj else []
     next_step_velocity = None
     for i, (t_curr, t_prev) in enumerate(zip(timesteps[:-1], timesteps[1:])):
+        if record_traj:
+            traj.append(img.detach().clone())
         t_vec = torch.full((img.shape[0],), t_curr, dtype=img.dtype, device=img.device)
         info['t'] = t_prev if inverse else t_curr
         info['inverse'] = inverse
@@ -278,6 +282,15 @@ def denoise_fireflow(
         next_step_velocity = pred_mid
 
         img = img + (t_prev - t_curr) * pred_mid
+
+    if record_traj:
+        traj.append(img.detach().clone())
+        # Inversion runs timesteps reversed (clean -> noisy). Reverse so
+        # traj[i] is the latent at the noise level matching target-pass
+        # step i (target-pass start-of-step i sees t = timesteps[i]).
+        if inverse:
+            traj = traj[::-1]
+        info['source_trajectory'] = traj
 
     return img, info
 

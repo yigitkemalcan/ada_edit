@@ -206,6 +206,10 @@ def run(args, *, t5=None, clip=None, model=None, ae=None, gt_mask=None):
         model = model.to(device)
 
     # --- Phase 1: inversion (original path) -------------------------
+    # Cache per-step latents only when the drift signal needs them.
+    info["record_source_trajectory"] = args.drift_metric in (
+        "latent_relative", "latent_relative_cosine",
+    )
     print("Phase 1: Inverting source image (original AdaEdit path)...")
     z_inv, info = denoise_fireflow(
         model, **inp_source, timesteps=timesteps,
@@ -487,7 +491,10 @@ def build_parser():
     p.add_argument(
         "--drift_metric", default="latent_init", type=str,
         choices=["latent_init", "latent_step", "latent_init_soft",
-                 "latent_combined"],
+                 "latent_combined",
+                 # phase-10 signal variants
+                 "latent_relative", "latent_init_cosine",
+                 "latent_init_p90", "latent_relative_cosine"],
     )
     p.add_argument(
         "--combine", default="multiply", type=str,

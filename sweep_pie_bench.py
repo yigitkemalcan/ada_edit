@@ -301,12 +301,188 @@ def phase_f04_sweep() -> List[Dict[str, Any]]:
     ]
 
 
+# ---------------------------------------------------------------------
+# Phase-10 sweep: drift-signal variants under the pd_best controller
+# ---------------------------------------------------------------------
+
+
+def drift_signal_configs(
+    td_relative: float = 0.02,
+    td_cosine: float = 0.02,
+    td_p90: float = 0.02,
+    td_rel_cos: Optional[float] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Phase-10 sweep: compare drift signals under a fixed controller.
+
+    All non-anchor rows use the phase-7/8 winner `_PD_BEST` (pd_adaptive,
+    kv=0.30, kp=1.5, kd=0.2, soft_mask on) and differ only in
+    `drift_metric` and its calibrated `target_drift`. Holding the
+    controller fixed isolates signal effects, mirroring how phase 9
+    held the signal fixed and varied the controller.
+
+    Calibration protocol (run once, plug values in here):
+      1. For each new drift_metric, run pd_best with kp=0, kd=0 on ~5
+         PIE-Bench samples and record the median drift over the
+         injection window.
+      2. Set target_drift = 0.8 * median.
+
+    Pass calibrated values via the keyword args; defaults match the
+    latent_init scale (0.02) as a placeholder only.
+
+    Rows:
+      - paper_adaedit   : original method, kv=0.9
+      - pd_best         : phase-7/8 anchor (latent_init, td=0.02)
+      - drift_relative  : latent_relative (trajectory-matched MSE)
+      - drift_cosine    : latent_init_cosine (directional)
+      - drift_p90       : latent_init_p90   (worst-tokens)
+      - drift_rel_cos   : latent_relative_cosine (only if V1 wins;
+                          pass td_rel_cos to include)
+    """
+    def _pd(**over):
+        out = dict(_PD_BEST)
+        out.update(over)
+        return out
+
+    rows: List[Dict[str, Any]] = [
+        {"name": "paper_adaedit",
+         "mode": "original",
+         "kv_mix_ratio": 0.9,
+         "ls_ratio": 0.25,
+         **_EXT_ON},
+        {"name": "pd_best", **_PD_BEST},
+        {"name": "drift_relative",
+         **_pd(drift_metric="latent_relative", target_drift=td_relative)},
+        {"name": "drift_cosine",
+         **_pd(drift_metric="latent_init_cosine", target_drift=td_cosine)},
+        {"name": "drift_p90",
+         **_pd(drift_metric="latent_init_p90", target_drift=td_p90)},
+    ]
+    if td_rel_cos is not None:
+        rows.append({
+            "name": "drift_rel_cos",
+            **_pd(drift_metric="latent_relative_cosine",
+                  target_drift=td_rel_cos),
+        })
+    return rows
+
+
+def calibrate_drift_signals(
+    *,
+    t5, clip, model, ae,
+    n: int = 5,
+    seed: int = 0,
+    metrics: Optional[List[str]] = None,
+    target_ratio: float = 0.8,
+    inject_weight_threshold: float = 0.05,
+    output_dir: str = "outputs_pie_calibration",
+    num_steps: int = 15,
+    run_seed: int = 42,
+    inject: int = 4,
+    inject_schedule: str = "sigmoid",
+    include_categories: Optional[List[int]] = None,
+    exclude_categories: Optional[List[int]] = (8,),
+    data_root: Optional[str] = None,
+) -> Dict[str, float]:
+    """
+    Calibrate ``target_drift`` for each candidate drift signal.
+
+    For each metric, runs `_PD_BEST` with the controller neutralized
+    (kp=0, kd=0) on `n` PIE-Bench samples — alpha stays at base_alpha,
+    so the kv schedule matches an unmodified `pd_best` and we just
+    *observe* the drift trajectory. Per sample, we take the median
+    drift across steps where ``inject_weight > inject_weight_threshold``
+    (the injection window), then take the median of those across
+    samples (median-of-medians, robust to outliers). The returned
+    target_drift is ``target_ratio * pooled_median``.
+
+    Returns a dict mapping each metric name to its calibrated
+    ``target_drift``. Values are ready to plug into
+    ``drift_signal_configs(td_relative=..., td_cosine=..., td_p90=...)``.
+    """
+    import json
+    import statistics
+
+    if metrics is None:
+        metrics = ["latent_relative", "latent_init_cosine", "latent_init_p90"]
+
+    os.makedirs(output_dir, exist_ok=True)
+    calibrated: Dict[str, float] = {}
+
+    for metric in metrics:
+        cfg = dict(_PD_BEST)
+        cfg.update(
+            name=f"calib_{metric}",
+            drift_metric=metric,
+            kp=0.0, kd=0.0,
+        )
+        cfg_dir = os.path.join(output_dir, cfg["name"])
+
+        print("\n" + "=" * 80)
+        print(f"= Calibration: {metric}  (n={n}, kp=kd=0)")
+        print("=" * 80)
+
+        rows = run_pie_samples(
+            t5=t5, clip=clip, model=model, ae=ae,
+            n=n, seed=seed,
+            config=cfg,
+            data_root=data_root,
+            output_dir=cfg_dir,
+            include_categories=include_categories,
+            exclude_categories=exclude_categories,
+            num_steps=num_steps,
+            run_seed=run_seed,
+            inject=inject,
+            inject_schedule=inject_schedule,
+            csv_path=os.path.join(cfg_dir, "calib_samples.csv"),
+        )
+
+        per_sample_medians: List[float] = []
+        for r in rows:
+            run_dir = r.get("run_dir") or ""
+            log_path = os.path.join(run_dir, "adaptive_log.json")
+            if not run_dir or not os.path.exists(log_path):
+                continue
+            try:
+                with open(log_path) as f:
+                    log = json.load(f)
+            except Exception:
+                continue
+            steps = log.get("per_step", []) if isinstance(log, dict) else log
+            window = [
+                float(s["drift"]) for s in steps
+                if float(s.get("inject_weight", 0.0)) > inject_weight_threshold
+                and s.get("drift") is not None
+            ]
+            if window:
+                per_sample_medians.append(statistics.median(window))
+
+        if not per_sample_medians:
+            print(f"  !! no usable adaptive logs for {metric}; defaulting td=0.02")
+            calibrated[metric] = 0.02
+            continue
+
+        pooled = statistics.median(per_sample_medians)
+        td = target_ratio * pooled
+        calibrated[metric] = td
+        print(
+            f"  {metric:<24}  pooled_median={pooled:.5f}  "
+            f"target_drift={td:.5f}  (n_samples={len(per_sample_medians)})"
+        )
+
+    print("\nCalibrated target_drift:")
+    for k, v in calibrated.items():
+        print(f"  {k:<24}  {v:.5f}")
+    return calibrated
+
+
 def _cfg_knobs(cfg: Dict[str, Any]) -> Dict[str, Any]:
     """The subset of cfg we echo into the aggregate CSV for each row."""
     return {
         "mode":            cfg.get("mode", "pd_adaptive"),
         "kv_mix_ratio":    cfg.get("kv_mix_ratio", ""),
         "target_drift":    cfg.get("target_drift", ""),
+        "drift_metric":    cfg.get("drift_metric", ""),
         "ls_ratio":        cfg.get("ls_ratio", ""),
         "kp":              cfg.get("kp", ""),
         "kd":              cfg.get("kd", ""),
@@ -391,7 +567,8 @@ def _print_cross_config_summary(summary_rows: List[Dict[str, Any]]) -> None:
 def _write_csv(summary_rows: List[Dict[str, Any]], csv_path: str) -> None:
     fixed = [
         "name", "status", "n_ok", "n_total", "time_min",
-        "mode", "kv_mix_ratio", "target_drift", "ls_ratio", "kp", "kd",
+        "mode", "kv_mix_ratio", "target_drift", "drift_metric",
+        "ls_ratio", "kp", "kd",
         "use_soft_mask", "use_adaptive_kv", "use_channel_ls",
         "edit_pres_ratio", "edit_drift_metric",
         "edit_fraction", "kv_mix_edit", "kv_mix_preserve", "alpha_edit",

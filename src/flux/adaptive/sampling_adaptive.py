@@ -99,6 +99,7 @@ def denoise_fireflow_adaptive(
     adaptive_log = []
     indices = info.get("indices", None)
     soft_mask = info.get("soft_mask", None)
+    source_traj = info.get("source_trajectory", None)
     if not torch.is_tensor(indices):
         indices = None
 
@@ -110,6 +111,8 @@ def denoise_fireflow_adaptive(
             z_init=z_init,
             indices=indices,
             soft_mask=soft_mask,
+            step_idx=i,
+            source_traj=source_traj,
         )
         if controller is not None:
             alpha_t = controller.step(drift_val)

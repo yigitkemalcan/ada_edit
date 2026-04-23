@@ -13,12 +13,22 @@ single update(img, ctx) -> float method.
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import List, Optional
 
 import torch
 
 
-_SUPPORTED = ("latent_init", "latent_step", "latent_init_soft", "latent_combined")
+_SUPPORTED = (
+    "latent_init",
+    "latent_step",
+    "latent_init_soft",
+    "latent_combined",
+    # phase-10 signal variants
+    "latent_relative",
+    "latent_init_cosine",
+    "latent_init_p90",
+    "latent_relative_cosine",
+)
 
 
 def _preservation_mask(
@@ -52,6 +62,42 @@ def _masked_mse(a: torch.Tensor, b: torch.Tensor, mask: torch.Tensor) -> float:
     num = (diff * mask).sum()
     den = mask.sum() * a.shape[-1] + 1e-8
     return float((num / den).item())
+
+
+def _masked_cosine_distance(
+    a: torch.Tensor, b: torch.Tensor, mask: torch.Tensor
+) -> float:
+    """1 - cosine_similarity over the masked preservation subspace.
+
+    Flattens [B, L, C] -> per-sample [L*C] vector with mask applied to
+    each token, then takes cosine across the preservation subspace.
+    Range ~[0, 2].
+    """
+    af = a.float()
+    bf = b.float()
+    m = mask  # [L, 1]
+    af_m = af * m
+    bf_m = bf * m
+    a_flat = af_m.reshape(af_m.shape[0], -1)
+    b_flat = bf_m.reshape(bf_m.shape[0], -1)
+    num = (a_flat * b_flat).sum(dim=-1)
+    den = a_flat.norm(dim=-1) * b_flat.norm(dim=-1) + 1e-8
+    cos = (num / den).clamp(-1.0, 1.0)
+    return float((1.0 - cos).mean().item())
+
+
+def _masked_percentile_err(
+    a: torch.Tensor, b: torch.Tensor, mask: torch.Tensor, q: float = 0.9
+) -> float:
+    """qth-quantile of per-token squared error, restricted to mask>0 tokens."""
+    diff = (a.float() - b.float()).pow(2).sum(dim=-1)  # [B, L]
+    m = mask.squeeze(-1)  # [L]
+    if m.dim() == 1:
+        m = m.unsqueeze(0).expand_as(diff)
+    sel = diff[m > 0]
+    if sel.numel() == 0:
+        return 0.0
+    return float(torch.quantile(sel, q).item())
 
 
 def compute_drift(
@@ -100,6 +146,8 @@ class DriftMeter:
         z_init: torch.Tensor,
         indices: Optional[torch.Tensor] = None,
         soft_mask: Optional[torch.Tensor] = None,
+        step_idx: Optional[int] = None,
+        source_traj: Optional[List[torch.Tensor]] = None,
     ) -> float:
         mask_dtype = torch.float32
         if self.mode in ("latent_init", "latent_init_soft"):
@@ -124,7 +172,42 @@ class DriftMeter:
             step_v = 0.0 if self._prev is None else _masked_mse(img, self._prev, mask)
             self._prev = img.detach().clone()
             value = 0.5 * init_v + 0.5 * step_v
+        elif self.mode == "latent_relative":
+            ref = self._lookup_ref(z_init, step_idx, source_traj)
+            mask = _preservation_mask(
+                img.shape[1], img.device, mask_dtype, indices, soft_mask
+            )
+            value = _masked_mse(img, ref, mask)
+        elif self.mode == "latent_init_cosine":
+            mask = _preservation_mask(
+                img.shape[1], img.device, mask_dtype, indices, soft_mask
+            )
+            value = _masked_cosine_distance(img, z_init, mask)
+        elif self.mode == "latent_init_p90":
+            mask = _preservation_mask(
+                img.shape[1], img.device, mask_dtype, indices, soft_mask
+            )
+            value = _masked_percentile_err(img, z_init, mask, q=0.9)
+        elif self.mode == "latent_relative_cosine":
+            ref = self._lookup_ref(z_init, step_idx, source_traj)
+            mask = _preservation_mask(
+                img.shape[1], img.device, mask_dtype, indices, soft_mask
+            )
+            rel = _masked_mse(img, ref, mask)
+            cos = _masked_cosine_distance(img, z_init, mask)
+            value = 0.5 * rel + 0.5 * cos
         else:
             raise RuntimeError(f"unreachable drift mode: {self.mode}")
 
         return value
+
+    @staticmethod
+    def _lookup_ref(
+        z_init: torch.Tensor,
+        step_idx: Optional[int],
+        source_traj: Optional[List[torch.Tensor]],
+    ) -> torch.Tensor:
+        if source_traj is None or step_idx is None or len(source_traj) == 0:
+            return z_init
+        i = max(0, min(int(step_idx), len(source_traj) - 1))
+        return source_traj[i]
