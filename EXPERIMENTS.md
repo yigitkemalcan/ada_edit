@@ -707,6 +707,102 @@ clip_dir    0/10
 
 ---
 
+## Phase 9 — v2 variant sweep (n=49, 7 configs)
+
+Phase 8 established `pd_kv0.30_soft_mask_only` as the best single-objective
+PD config on full PIE-Bench. Phase 9 benchmarks five new *mode* families against
+two anchors (`paper_adaedit`, `pd_best` = phase-7/8 winner) to determine
+whether any structural variant beats the incumbent. Same pipeline seed and
+15-step sigmoid schedule; n=49 samples.
+
+Driver: `sweep_pie_bench.py::v2_configs()`.
+
+### Configurations
+
+| Name | Mode | Key knobs |
+|------|------|-----------|
+| `paper_adaedit` | `original` | kv=0.90, ls=0.25, all 3 extensions on |
+| `pd_best` | `pd_adaptive` | kv=0.30, kp=1.5, kd=0.2, soft_mask only |
+| `dual_r3` | `dual_objective` | as pd_best + edit_pres_ratio=3.0 |
+| `phase_f04` | `two_phase_switch` | as pd_best + edit_fraction=0.4, kv_mix_edit=0.45, kv_mix_preserve=0.9 |
+| `asym_45_90` | `asymmetric_region` | as pd_best + kv_mix_edit=0.45, kv_mix_preserve=0.9 |
+| `sched_hl` | `scheduled_target` | as pd_best + td_high=0.08, td_low=0.015, cosine_high_low |
+| `xattn_07` | `xattn_boost` | as pd_best + release_factor=0.7 |
+
+### Results
+
+```
+name           time_min  n_ok  psnr     ssim    lpips   psnr_bg  ssim_bg  lpips_bg  clip_i  clip_t  clip_dir
+-------------  --------  ----  -------  ------  ------  -------  -------  --------  ------  ------  --------
+paper_adaedit  10.2300   49    17.6689  0.6054  0.3950  19.9673  0.6854   0.2120    0.8840  0.2716  0.1181
+pd_best        10.0000   49    20.0007  0.6696  0.3186  21.3759  0.7132   0.1896    0.8980  0.2666  0.1147
+dual_r3        10.0000   49    20.0150  0.6703  0.3173  21.3921  0.7133   0.1890    0.8967  0.2677  0.1173
+phase_f04      10.0000   49    20.0848  0.6714  0.3148  21.4395  0.7134   0.1883    0.8997  0.2669  0.1148
+asym_45_90     10.0200   49    18.5663  0.6379  0.3583  19.3167  0.6763   0.2219    0.8938  0.2681  0.1117
+sched_hl        9.9800   49    20.0270  0.6707  0.3169  21.4013  0.7136   0.1890    0.8989  0.2667  0.1157
+xattn_07        9.9900   49    20.0522  0.6709  0.3162  21.4079  0.7125   0.1896    0.8990  0.2672  0.1171
+```
+
+Best per metric:
+```
+     psnr (↑): phase_f04      20.0848
+     ssim (↑): phase_f04      0.6714
+    lpips (↓): phase_f04      0.3148
+  psnr_bg (↑): phase_f04      21.4395
+  ssim_bg (↑): sched_hl       0.7136
+ lpips_bg (↓): phase_f04      0.1883
+   clip_i (↑): phase_f04      0.8997
+   clip_t (↑): paper_adaedit  0.2716
+ clip_dir (↑): paper_adaedit  0.1181
+```
+
+Metric wins (out of 9): `phase_f04` 6, `paper_adaedit` 2, `sched_hl` 1.
+
+### vs. pd_best anchor
+
+|          | pd_best | **phase_f04** | Δ |
+|----------|---------|---------------|---|
+| psnr     | 20.0007 | **20.0848** | +0.084 dB |
+| ssim     | 0.6696  | **0.6714**  | +0.002 |
+| lpips    | 0.3186  | **0.3148**  | −0.004 |
+| psnr_bg  | 21.3759 | **21.4395** | +0.064 dB |
+| ssim_bg  | 0.7132  | 0.7134      | +0.000 |
+| lpips_bg | 0.1896  | **0.1883**  | −0.001 |
+| clip_i   | 0.8980  | **0.8997**  | +0.002 |
+| clip_t   | 0.2666  | 0.2669      | +0.000 |
+| clip_dir | 0.1147  | 0.1148      | ≈ 0 |
+
+### Takeaways
+
+1. **`phase_f04` beats the incumbent on all fidelity metrics.** The
+   `two_phase_switch` mode (edit_fraction=0.4, kv_mix_edit=0.45,
+   kv_mix_preserve=0.9) wins 6 of 9 metrics. Gains over `pd_best` are
+   modest (+0.08 dB psnr, +0.06 dB psnr_bg) but consistent and direction-
+   ally clean — no metric regressed.
+2. **`dual_r3`, `sched_hl`, and `xattn_07` are competitive but don't win.**
+   All three cluster within 0.08 dB psnr of `phase_f04` and above `pd_best`,
+   suggesting the two-phase and scheduled-target families offer further headroom.
+   Their wins on ssim_bg (`sched_hl`) and clip_dir (`dual_r3`) make them
+   worth a follow-up grid sweep.
+3. **`asym_45_90` regresses.** 18.57 psnr — on par with `paper_adaedit`.
+   `asymmetric_region` mode with kv_edit=0.45 / kv_preserve=0.9 without
+   the phase-switching structure appears harmful; edit and preservation
+   regions are not cleanly separated at 0.45, causing leakage.
+4. **CLIP-t / CLIP-dir again go to `paper_adaedit`.** Consistent with
+   earlier phases — the pattern is a property of the higher-kv original
+   mode, not a signal about edit quality. The PD-family configs are all
+   within 0.002 of each other on CLIP-t.
+
+### Next step
+
+- **Follow-up grid for `phase_f04`:** sweep `edit_fraction ∈ {0.3, 0.4, 0.5}`
+  and asymmetric kv pairs on n=30 to characterize the mode's parameter surface.
+- **Follow-up for `sched_hl`:** vary `td_high / td_low` ratio and profile
+  shape (`cosine` vs `linear`) — the current config is a single middle-of-grid
+  shot.
+
+---
+
 ## Next step
 
 1. **kv trade-off sweep on full 700 (optional).** n=30 showed

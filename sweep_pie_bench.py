@@ -231,6 +231,76 @@ def v2_configs() -> List[Dict[str, Any]]:
     ]
 
 
+def phase_f04_sweep() -> List[Dict[str, Any]]:
+    """
+    Marginal sweep around the phase-9 winner (phase_f04 / two_phase_switch).
+
+    Anchor: edit_fraction=0.40, kv_mix_edit=0.45, kv_mix_preserve=0.90,
+            alpha_edit=0.30 (all other knobs from _PD_BEST).
+
+    One axis is varied at a time while the others stay at the anchor.
+    The pd_best config is included as an external baseline.
+
+    Configs (11):
+      pd_best              — phase-7/8 single-objective anchor
+      pf_base              — two_phase_switch at phase-9 winner values
+      pf_ef30 … pf_ef50    — edit_fraction ∈ {0.30, 0.35, 0.45, 0.50}
+      pf_kve30, pf_kve60   — kv_mix_edit ∈ {0.30, 0.60}
+      pf_kvp75             — kv_mix_preserve = 0.75
+      pf_ae15, pf_ae45     — alpha_edit ∈ {0.15, 0.45}
+
+    Questions this sweep answers:
+      1. What is the optimal edit_fraction for two_phase_switch on PIE-Bench?
+      2. Does a lower kv_mix_edit (more source KV during edit phase) or
+         higher (less source KV) improve fidelity / edit quality?
+      3. Does relaxing kv_mix_preserve (0.75 vs 0.90) hurt preservation?
+      4. Does a weaker or stronger alpha_edit gate change the balance?
+    """
+    # Anchor values matching the phase-9 phase_f04 config.
+    _BASE_EF   = 0.40
+    _BASE_KVE  = 0.45
+    _BASE_KVP  = 0.90
+    _BASE_AE   = 0.30
+
+    def _pf(name, **over):
+        cfg = dict(_PD_BEST)
+        cfg.update(
+            mode="two_phase_switch",
+            edit_fraction=_BASE_EF,
+            kv_mix_edit=_BASE_KVE,
+            kv_mix_preserve=_BASE_KVP,
+            alpha_edit=_BASE_AE,
+        )
+        cfg.update(over)
+        cfg["name"] = name
+        return cfg
+
+    return [
+        # External baseline
+        {"name": "pd_best", **_PD_BEST},
+
+        # Anchor (reproduces phase_f04 from phase 9)
+        _pf("pf_base"),
+
+        # edit_fraction axis
+        _pf("pf_ef30", edit_fraction=0.30),
+        _pf("pf_ef35", edit_fraction=0.35),
+        _pf("pf_ef45", edit_fraction=0.45),
+        _pf("pf_ef50", edit_fraction=0.50),
+
+        # kv_mix_edit axis
+        _pf("pf_kve30", kv_mix_edit=0.30),
+        _pf("pf_kve60", kv_mix_edit=0.60),
+
+        # kv_mix_preserve axis
+        _pf("pf_kvp75", kv_mix_preserve=0.75),
+
+        # alpha_edit axis
+        _pf("pf_ae15", alpha_edit=0.15),
+        _pf("pf_ae45", alpha_edit=0.45),
+    ]
+
+
 def _cfg_knobs(cfg: Dict[str, Any]) -> Dict[str, Any]:
     """The subset of cfg we echo into the aggregate CSV for each row."""
     return {
@@ -249,6 +319,7 @@ def _cfg_knobs(cfg: Dict[str, Any]) -> Dict[str, Any]:
         "edit_fraction":   cfg.get("edit_fraction", ""),
         "kv_mix_edit":     cfg.get("kv_mix_edit", ""),
         "kv_mix_preserve": cfg.get("kv_mix_preserve", ""),
+        "alpha_edit":      cfg.get("alpha_edit", ""),
         "td_profile":      cfg.get("td_profile", ""),
         "td_high":         cfg.get("td_high", ""),
         "td_low":          cfg.get("td_low", ""),
@@ -323,7 +394,7 @@ def _write_csv(summary_rows: List[Dict[str, Any]], csv_path: str) -> None:
         "mode", "kv_mix_ratio", "target_drift", "ls_ratio", "kp", "kd",
         "use_soft_mask", "use_adaptive_kv", "use_channel_ls",
         "edit_pres_ratio", "edit_drift_metric",
-        "edit_fraction", "kv_mix_edit", "kv_mix_preserve",
+        "edit_fraction", "kv_mix_edit", "kv_mix_preserve", "alpha_edit",
         "td_profile", "td_high", "td_low", "release_factor",
         *_METRIC_ORDER,
         *(f"{m}_n" for m in _METRIC_ORDER),
