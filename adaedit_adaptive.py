@@ -51,12 +51,16 @@ from src.flux.util import (
 )
 from src.flux.adaptive import (
     DriftMeter,
+    EditProgressMeter,
+    V2_MODES,
     denoise_fireflow_adaptive,
+    dispatch_v2_sampler,
     make_controller,
+    make_controller_v2,
 )
 
 NSFW_THRESHOLD = 0.85
-ADAPTIVE_MODES = (
+ADAPTIVE_MODES_V1 = (
     "original",
     "scheduled_fixed",
     "fixed_soft",
@@ -64,6 +68,7 @@ ADAPTIVE_MODES = (
     "pid_adaptive",
     "no_injection",
 )
+ADAPTIVE_MODES = ADAPTIVE_MODES_V1 + V2_MODES
 
 
 @torch.inference_mode()
@@ -155,6 +160,16 @@ def run(args, *, t5=None, clip=None, model=None, ae=None, gt_mask=None):
     inp_target = prepare(t5, clip, init_latent, prompt=args.target_prompt)
     inp_random = prepare(t5, clip, z_random, prompt=args.target_prompt)
     key_word_index = get_word_index(args.source_prompt, args.edit_object, t5)
+    # target-prompt index for variant E xattn capture; falls back to source's
+    # index if the edit object isn't found in the target prompt.
+    try:
+        target_key_word_index = get_word_index(
+            args.target_prompt, args.edit_object, t5
+        )
+        if not target_key_word_index:
+            target_key_word_index = key_word_index
+    except Exception:
+        target_key_word_index = key_word_index
 
     info = {
         "feature_path": args.feature_path,
@@ -164,6 +179,7 @@ def run(args, *, t5=None, clip=None, model=None, ae=None, gt_mask=None):
         "latent_h": new_h // 16,
         "latent_w": new_w // 16,
         "key_word_index": key_word_index,
+        "target_key_word_index": target_key_word_index,
         "edit_type": args.edit_type,
         "kv_mix_ratio": args.kv_mix_ratio,
         "indices": [],
@@ -217,15 +233,34 @@ def run(args, *, t5=None, clip=None, model=None, ae=None, gt_mask=None):
     )
 
     # --- Phase 3: target pass ---------------------------------------
-    controller = make_controller(
-        args.mode,
-        kp=args.kp, ki=args.ki, kd=args.kd,
-        target_drift=args.target_drift,
-        base_alpha=args.base_alpha,
-        alpha_min=args.alpha_min,
-        alpha_max=args.alpha_max,
-        integral_clip=args.integral_clip,
-    )
+    is_v2 = args.mode in V2_MODES
+    if is_v2:
+        controller = make_controller_v2(
+            args.mode,
+            num_steps=args.num_steps,
+            base_alpha=args.base_alpha,
+            alpha_min=args.alpha_min,
+            alpha_max=args.alpha_max,
+            kp=args.kp, kd=args.kd,
+            target_drift=args.target_drift,
+            kp_p=args.kp_p, kd_p=args.kd_p,
+            kp_e=args.kp_e, kd_e=args.kd_e,
+            target_pres=args.target_pres,
+            edit_pres_ratio=args.edit_pres_ratio,
+            clip_pres_below_zero=args.clip_pres_below_zero,
+            td_high=args.td_high, td_low=args.td_low,
+            td_profile=args.td_profile,
+        )
+    else:
+        controller = make_controller(
+            args.mode,
+            kp=args.kp, ki=args.ki, kd=args.kd,
+            target_drift=args.target_drift,
+            base_alpha=args.base_alpha,
+            alpha_min=args.alpha_min,
+            alpha_max=args.alpha_max,
+            integral_clip=args.integral_clip,
+        )
 
     drift_meter = DriftMeter(mode=args.drift_metric)
 
@@ -242,6 +277,50 @@ def run(args, *, t5=None, clip=None, model=None, ae=None, gt_mask=None):
         )
         info["kv_mix"] = prev_kv_mix
         info.setdefault("adaptive_log", [])
+    elif is_v2:
+        print(
+            f"Phase 3: target pass — mode={args.mode} (v2 sampler, "
+            f"drift={args.drift_metric}, combine={args.combine})"
+        )
+        sampler = dispatch_v2_sampler(args.mode)
+        common_kwargs = dict(
+            model=model,
+            **inp_target,
+            timesteps=timesteps,
+            info=info,
+            z_init=z_inv.clone(),
+            controller=controller,
+            drift_meter=drift_meter,
+            combine=args.combine,
+            guidance=args.guidance,
+        )
+        if args.mode == "dual_objective":
+            edit_meter = EditProgressMeter(mode=args.edit_drift_metric)
+            x_out, info = sampler(edit_meter=edit_meter, **common_kwargs)
+        elif args.mode == "two_phase_switch":
+            x_out, info = sampler(
+                edit_fraction=args.edit_fraction,
+                alpha_edit=args.alpha_edit,
+                kv_mix_edit=args.kv_mix_edit,
+                kv_mix_preserve=args.kv_mix_preserve,
+                phase_ramp_steps=args.phase_ramp_steps,
+                **common_kwargs,
+            )
+        elif args.mode == "asymmetric_region":
+            x_out, info = sampler(
+                kv_mix_edit=args.kv_mix_edit,
+                kv_mix_preserve=args.kv_mix_preserve,
+                **common_kwargs,
+            )
+        elif args.mode == "xattn_boost":
+            x_out, info = sampler(
+                target_xattn=args.target_xattn,
+                xattn_release_threshold=args.xattn_release_threshold,
+                release_factor=args.release_factor,
+                **common_kwargs,
+            )
+        else:  # scheduled_target
+            x_out, info = sampler(**common_kwargs)
     elif args.mode in ("original", "scheduled_fixed") or controller is None:
         print(f"Phase 3: target pass — mode={args.mode} (original sampler)")
         x_out, info = denoise_fireflow(
@@ -424,6 +503,60 @@ def build_parser():
     p.add_argument("--alpha_min", default=0.2, type=float)
     p.add_argument("--alpha_max", default=1.2, type=float)
     p.add_argument("--integral_clip", default=1.0, type=float)
+
+    # --- v2 adaptive controls (only used when --mode is a v2 mode) ---
+    # variant A: dual_objective
+    p.add_argument("--kp_p", default=1.5, type=float,
+                   help="v2 dual_objective: proportional gain for preservation error")
+    p.add_argument("--kd_p", default=0.2, type=float,
+                   help="v2 dual_objective: derivative gain for preservation error")
+    p.add_argument("--kp_e", default=1.0, type=float,
+                   help="v2 dual_objective: proportional gain for edit error")
+    p.add_argument("--kd_e", default=0.1, type=float,
+                   help="v2 dual_objective: derivative gain for edit error")
+    p.add_argument("--target_pres", default=0.02, type=float,
+                   help="v2 dual_objective: preservation drift setpoint")
+    p.add_argument("--edit_pres_ratio", default=3.0, type=float,
+                   help="v2 dual_objective: target_edit = ratio * target_pres")
+    p.add_argument("--edit_drift_metric", default="edit_init", type=str,
+                   choices=["edit_init", "edit_step", "edit_init_soft",
+                            "edit_normalized"],
+                   help="v2 dual_objective: edit-side drift meter")
+    p.add_argument("--no_clip_pres_below_zero", dest="clip_pres_below_zero",
+                   action="store_false",
+                   help="v2 dual_objective: allow e_pres < 0 (rewards over-preserve)")
+    p.add_argument("--clip_pres_below_zero", dest="clip_pres_below_zero",
+                   action="store_true", default=True,
+                   help="v2 dual_objective: floor e_pres at 0 (default on)")
+
+    # variant B: two_phase_switch
+    p.add_argument("--edit_fraction", default=0.4, type=float,
+                   help="v2 two_phase_switch: fraction of steps in edit phase")
+    p.add_argument("--alpha_edit", default=0.3, type=float,
+                   help="v2 two_phase_switch: forced alpha during edit phase")
+    p.add_argument("--kv_mix_edit", default=0.45, type=float,
+                   help="v2 two_phase_switch / asymmetric_region: edit-side kv mix")
+    p.add_argument("--kv_mix_preserve", default=0.9, type=float,
+                   help="v2 two_phase_switch / asymmetric_region: preserve-side kv mix")
+    p.add_argument("--phase_ramp_steps", default=2, type=int,
+                   help="v2 two_phase_switch: linear ramp length between phases")
+
+    # variant D: scheduled_target
+    p.add_argument("--td_high", default=0.08, type=float,
+                   help="v2 scheduled_target: high-end target drift")
+    p.add_argument("--td_low", default=0.015, type=float,
+                   help="v2 scheduled_target: low-end target drift")
+    p.add_argument("--td_profile", default="cosine_high_low", type=str,
+                   choices=["cosine_high_low", "cosine_low_high", "linear"],
+                   help="v2 scheduled_target: target_drift profile")
+
+    # variant E: xattn_boost
+    p.add_argument("--target_xattn", default=0.08, type=float,
+                   help="v2 xattn_boost: desired mean xattn to edit word")
+    p.add_argument("--xattn_release_threshold", default=0.02, type=float,
+                   help="v2 xattn_boost: error threshold that triggers release")
+    p.add_argument("--release_factor", default=0.7, type=float,
+                   help="v2 xattn_boost: alpha scale when under-attending")
 
     # logging / metrics
     p.add_argument("--log_controller", action="store_true", default=True,

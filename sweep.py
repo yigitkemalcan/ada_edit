@@ -139,6 +139,26 @@ def _build_args(
         ("alpha_max",      "--alpha_max"),
         ("drift_metric",   "--drift_metric"),
         ("combine",        "--combine"),
+        # v2 knobs (only relevant for v2 modes, ignored otherwise)
+        ("kp_p",            "--kp_p"),
+        ("kd_p",            "--kd_p"),
+        ("kp_e",            "--kp_e"),
+        ("kd_e",            "--kd_e"),
+        ("target_pres",     "--target_pres"),
+        ("edit_pres_ratio", "--edit_pres_ratio"),
+        ("edit_drift_metric","--edit_drift_metric"),
+        ("edit_fraction",   "--edit_fraction"),
+        ("alpha_edit",      "--alpha_edit"),
+        ("kv_mix_edit",     "--kv_mix_edit"),
+        ("kv_mix_preserve", "--kv_mix_preserve"),
+        ("phase_ramp_steps","--phase_ramp_steps"),
+        ("td_high",         "--td_high"),
+        ("td_low",          "--td_low"),
+        ("td_profile",      "--td_profile"),
+        ("target_xattn",    "--target_xattn"),
+        ("xattn_release_threshold", "--xattn_release_threshold"),
+        ("release_factor",  "--release_factor"),
+        ("channel_ls_temp", "--channel_ls_temp"),
     ]:
         if k in cfg:
             cli += [flag, str(cfg[k])]
@@ -150,6 +170,9 @@ def _build_args(
     ]:
         if cfg.get(k, False):
             cli.append(flag)
+    # special-case: clip_pres_below_zero defaults True; explicit False turns it off.
+    if cfg.get("clip_pres_below_zero", True) is False:
+        cli.append("--no_clip_pres_below_zero")
     return build_parser().parse_args(cli)
 
 

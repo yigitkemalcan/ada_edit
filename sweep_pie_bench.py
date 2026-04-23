@@ -159,6 +159,132 @@ def _default_configs() -> List[Dict[str, Any]]:
     return configs
 
 
+# ---------------------------------------------------------------------
+# v2 sweep: all 5 new variants + anchors (paper, pd_best)
+# ---------------------------------------------------------------------
+
+# Current best from phase-7/8: pd_adaptive, kv=0.30, kp=1.5, kd=0.2,
+# target_drift=0.02, soft_mask ON, channel_ls + adaptive_kv OFF,
+# ls_ratio=0.45. This is our "pd_best" anchor — the bar to beat.
+_PD_BEST: Dict[str, Any] = dict(
+    mode="pd_adaptive",
+    kv_mix_ratio=0.30,
+    target_drift=0.02,
+    ls_ratio=0.45,
+    kp=1.5,
+    kd=0.2,
+    use_soft_mask=True,
+)
+
+
+def v2_configs() -> List[Dict[str, Any]]:
+    """
+    Grid used by the v2 70-sample PIE-Bench sweep. Anchors:
+      - baseline          : vanilla FLUX, minimal injection
+      - paper_adaedit     : paper config with 3 extensions
+      - pd_best           : current phase-8 winner (single-objective PD)
+    Followed by parameter sweeps over each of the 5 v2 variants.
+    """
+    cfgs: List[Dict[str, Any]] = []
+
+    # --- anchors (3) ------------------------------------------------
+    cfgs.append({
+        "name": "baseline",
+        "mode": "original",
+        "kv_mix_ratio": 0.9,
+        "ls_ratio": 0.25,
+    })
+    cfgs.append({
+        "name": "paper_adaedit",
+        "mode": "original",
+        "kv_mix_ratio": 0.9,
+        "ls_ratio": 0.25,
+        **_EXT_ON,
+    })
+    cfgs.append({
+        "name": "pd_best",
+        **_PD_BEST,
+    })
+
+    # Shared base for most v2 configs: the winning pd_best knobs,
+    # with the mode overridden per variant.
+    def _pd(**over):
+        out = dict(_PD_BEST)
+        out.update(over)
+        return out
+
+    # --- variant A: dual_objective (4) ------------------------------
+    cfgs.append({"name": "dual_r2",
+                 **_pd(mode="dual_objective"),
+                 "edit_pres_ratio": 2.0})
+    cfgs.append({"name": "dual_r3",
+                 **_pd(mode="dual_objective"),
+                 "edit_pres_ratio": 3.0})
+    cfgs.append({"name": "dual_r5",
+                 **_pd(mode="dual_objective"),
+                 "edit_pres_ratio": 5.0})
+    cfgs.append({"name": "dual_norm",
+                 **_pd(mode="dual_objective"),
+                 "edit_pres_ratio": 3.0,
+                 "edit_drift_metric": "edit_normalized"})
+
+    # --- variant B: two_phase_switch (4) ----------------------------
+    cfgs.append({"name": "phase_f03",
+                 **_pd(mode="two_phase_switch"),
+                 "edit_fraction": 0.3,
+                 "kv_mix_edit": 0.45, "kv_mix_preserve": 0.9})
+    cfgs.append({"name": "phase_f04",
+                 **_pd(mode="two_phase_switch"),
+                 "edit_fraction": 0.4,
+                 "kv_mix_edit": 0.45, "kv_mix_preserve": 0.9})
+    cfgs.append({"name": "phase_f05",
+                 **_pd(mode="two_phase_switch"),
+                 "edit_fraction": 0.5,
+                 "kv_mix_edit": 0.45, "kv_mix_preserve": 0.9})
+    cfgs.append({"name": "phase_kvhi",
+                 **_pd(mode="two_phase_switch"),
+                 "edit_fraction": 0.4,
+                 "kv_mix_edit": 0.30, "kv_mix_preserve": 0.9})
+
+    # --- variant C: asymmetric_region (4) ---------------------------
+    cfgs.append({"name": "asym_45_90",
+                 **_pd(mode="asymmetric_region"),
+                 "kv_mix_edit": 0.45, "kv_mix_preserve": 0.9})
+    cfgs.append({"name": "asym_35_90",
+                 **_pd(mode="asymmetric_region"),
+                 "kv_mix_edit": 0.35, "kv_mix_preserve": 0.9})
+    cfgs.append({"name": "asym_50_85",
+                 **_pd(mode="asymmetric_region"),
+                 "kv_mix_edit": 0.50, "kv_mix_preserve": 0.85})
+    cfgs.append({"name": "asym_25_95",
+                 **_pd(mode="asymmetric_region"),
+                 "kv_mix_edit": 0.25, "kv_mix_preserve": 0.95})
+
+    # --- variant D: scheduled_target (3) ----------------------------
+    cfgs.append({"name": "sched_hl",
+                 **_pd(mode="scheduled_target"),
+                 "td_high": 0.08, "td_low": 0.015,
+                 "td_profile": "cosine_high_low"})
+    cfgs.append({"name": "sched_lh",
+                 **_pd(mode="scheduled_target"),
+                 "td_high": 0.015, "td_low": 0.08,
+                 "td_profile": "cosine_low_high"})
+    cfgs.append({"name": "sched_lin",
+                 **_pd(mode="scheduled_target"),
+                 "td_high": 0.08, "td_low": 0.015,
+                 "td_profile": "linear"})
+
+    # --- variant E: xattn_boost (2) ---------------------------------
+    cfgs.append({"name": "xattn_07",
+                 **_pd(mode="xattn_boost"),
+                 "release_factor": 0.7})
+    cfgs.append({"name": "xattn_05",
+                 **_pd(mode="xattn_boost"),
+                 "release_factor": 0.5})
+
+    return cfgs
+
+
 def _cfg_knobs(cfg: Dict[str, Any]) -> Dict[str, Any]:
     """The subset of cfg we echo into the aggregate CSV for each row."""
     return {
@@ -171,6 +297,16 @@ def _cfg_knobs(cfg: Dict[str, Any]) -> Dict[str, Any]:
         "use_soft_mask":   cfg.get("use_soft_mask", False),
         "use_adaptive_kv": cfg.get("use_adaptive_kv", False),
         "use_channel_ls":  cfg.get("use_channel_ls", False),
+        # v2 diagnostics (empty when not set)
+        "edit_pres_ratio": cfg.get("edit_pres_ratio", ""),
+        "edit_drift_metric": cfg.get("edit_drift_metric", ""),
+        "edit_fraction":   cfg.get("edit_fraction", ""),
+        "kv_mix_edit":     cfg.get("kv_mix_edit", ""),
+        "kv_mix_preserve": cfg.get("kv_mix_preserve", ""),
+        "td_profile":      cfg.get("td_profile", ""),
+        "td_high":         cfg.get("td_high", ""),
+        "td_low":          cfg.get("td_low", ""),
+        "release_factor":  cfg.get("release_factor", ""),
     }
 
 
@@ -240,6 +376,9 @@ def _write_csv(summary_rows: List[Dict[str, Any]], csv_path: str) -> None:
         "name", "status", "n_ok", "n_total", "time_min",
         "mode", "kv_mix_ratio", "target_drift", "ls_ratio", "kp", "kd",
         "use_soft_mask", "use_adaptive_kv", "use_channel_ls",
+        "edit_pres_ratio", "edit_drift_metric",
+        "edit_fraction", "kv_mix_edit", "kv_mix_preserve",
+        "td_profile", "td_high", "td_low", "release_factor",
         *_METRIC_ORDER,
         *(f"{m}_n" for m in _METRIC_ORDER),
         "per_config_csv",

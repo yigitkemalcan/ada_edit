@@ -90,6 +90,80 @@ def apply_kv_mix_with_soft_mask(source_k, source_v, target_k, target_v,
 
     return out_k, out_v
 
+
+def apply_kv_mix_asymmetric(source_k, source_v, target_k, target_v,
+                            soft_mask, r_edit, r_preserve, edit_type):
+    """
+    Region-conditional KV-Mix (variant C of the v2 adaptive suite).
+
+    Unlike apply_kv_mix_with_soft_mask which uses a single ratio and
+    falls back to pure source in the non-edit region, this function
+    mixes both regions but with DIFFERENT ratios:
+
+        edit region (soft_mask→1)      : mix with r_edit
+        preservation region (soft_mask→0): mix with r_preserve
+
+    This lets the edit region use a low ratio (more target K/V freedom
+    → stronger editing) while the preservation region uses a high
+    ratio (source-dominated but not identical → more edit coherence).
+
+    soft_mask: [H*W] tensor in [0, 1]
+    r_edit, r_preserve: scalar floats in [0, 1]
+    """
+    m = soft_mask.view(1, 1, -1, 1)
+
+    if edit_type == 'change' or edit_type == 'remove':
+        mixed_edit = (1 - r_edit) * source_k + r_edit * target_k
+        mixed_pres = (1 - r_preserve) * source_k + r_preserve * target_k
+        out_k = m * mixed_edit + (1 - m) * mixed_pres
+        mixed_edit_v = (1 - r_edit) * source_v + r_edit * target_v
+        mixed_pres_v = (1 - r_preserve) * source_v + r_preserve * target_v
+        out_v = m * mixed_edit_v + (1 - m) * mixed_pres_v
+    elif edit_type == 'add':
+        # For 'add' the v1 convention preserves source in the mask and
+        # mixes outside. Keep that shape; r_edit controls in-mask (we
+        # still dominate source there), r_preserve controls outside.
+        mixed_edit_k = (1 - r_edit) * source_k + r_edit * target_k
+        mixed_pres_k = (1 - r_preserve) * source_k + r_preserve * target_k
+        out_k = m * mixed_edit_k + (1 - m) * mixed_pres_k
+        mixed_edit_v = (1 - r_edit) * source_v + r_edit * target_v
+        mixed_pres_v = (1 - r_preserve) * source_v + r_preserve * target_v
+        out_v = m * mixed_edit_v + (1 - m) * mixed_pres_v
+    elif edit_type == 'style':
+        # Style edits are global; honor r_edit as the global ratio.
+        out_k = r_edit * target_k + (1 - r_edit) * source_k
+        out_v = r_edit * target_v + (1 - r_edit) * source_v
+    else:
+        out_k = source_k
+        out_v = source_v
+
+    return out_k, out_v
+
+
+def _maybe_capture_xattn(info, attn_map):
+    """
+    Variant E (xattn_boost): capture mean attention from image tokens to
+    the edit word once per step. No-op unless info['capture_xattn_to_editword']
+    is True. Only runs on the last double-stream block (id==18) and on
+    the first (non-second-order) pass, so at most one write per step.
+    Uses info['target_key_word_index'] if present (target-prompt
+    indexing) else falls back to info['key_word_index'].
+    """
+    if not info.get('capture_xattn_to_editword', False):
+        return
+    if info.get('id', -1) != 18 or info.get('second_order', False):
+        return
+    kwi = info.get('target_key_word_index', None) or info.get('key_word_index', None)
+    if kwi is None or len(kwi) == 0:
+        return
+    try:
+        token_idx = int(kwi[-1])
+        info['xattn_edit_score'] = float(
+            attn_map[0, :, 512:, token_idx].mean().item()
+        )
+    except Exception:
+        pass
+
 class EmbedND(nn.Module):
     def __init__(self, dim: int, theta: int, axes_dim: list[int]):
         super().__init__()
@@ -319,7 +393,20 @@ class DoubleStreamBlock(nn.Module):
                     else:
                         kv_mix_ratio = info['kv_mix_ratio']
 
-                    if use_soft_mask and 'soft_mask' in info:
+                    if (
+                        'kv_mix_ratio_edit' in info
+                        and use_soft_mask
+                        and 'soft_mask' in info
+                    ):
+                        # variant C: region-conditional kv_mix
+                        source_img_k, source_img_v = apply_kv_mix_asymmetric(
+                            source_img_k, source_img_v, img_k, img_v,
+                            info['soft_mask'].to(img.device),
+                            float(info['kv_mix_ratio_edit']),
+                            float(info['kv_mix_ratio_preserve']),
+                            edit_type,
+                        )
+                    elif use_soft_mask and 'soft_mask' in info:
                         source_img_k, source_img_v = apply_kv_mix_with_soft_mask(
                             source_img_k, source_img_v, img_k, img_v,
                             info['soft_mask'].to(img.device), kv_mix_ratio, edit_type
@@ -351,6 +438,7 @@ class DoubleStreamBlock(nn.Module):
                     k = torch.cat((txt_k, img_k), dim=2)
                     v = torch.cat((txt_v, img_v), dim=2)
                 attn, attn_map = attention(q, k, v, pe=pe)
+                _maybe_capture_xattn(info, attn_map)
             else:
                 if info['inject'] and info['sampling_solver'] == 'uniedit':
                     feature_name_k = str(info['t']) + '_' + str(info['second_order']) + '_' + str(info['id']) + '_' + info['type'] + '_' + 'K'
@@ -361,6 +449,7 @@ class DoubleStreamBlock(nn.Module):
                 k = torch.cat((txt_k, img_k), dim=2)
                 v = torch.cat((txt_v, img_v), dim=2)
                 attn, attn_map = attention(q, k, v, pe=pe)
+                _maybe_capture_xattn(info, attn_map)
 
         txt_attn, img_attn = attn[:, : txt.shape[1]], attn[:, txt.shape[1] :]
 
@@ -449,7 +538,20 @@ class SingleStreamBlock(nn.Module):
                     else:
                         kv_mix_ratio = info['kv_mix_ratio']
 
-                    if use_soft_mask and 'soft_mask' in info:
+                    if (
+                        'kv_mix_ratio_edit' in info
+                        and use_soft_mask
+                        and 'soft_mask' in info
+                    ):
+                        # variant C: region-conditional kv_mix
+                        source_img_k, source_img_v = apply_kv_mix_asymmetric(
+                            source_img_k, source_img_v, img_k, img_v,
+                            info['soft_mask'].to(x.device),
+                            float(info['kv_mix_ratio_edit']),
+                            float(info['kv_mix_ratio_preserve']),
+                            edit_type,
+                        )
+                    elif use_soft_mask and 'soft_mask' in info:
                         source_img_k, source_img_v = apply_kv_mix_with_soft_mask(
                             source_img_k, source_img_v, img_k, img_v,
                             info['soft_mask'].to(x.device), kv_mix_ratio, edit_type
