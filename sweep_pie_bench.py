@@ -367,6 +367,69 @@ def drift_signal_configs(
     return rows
 
 
+# ---------------------------------------------------------------------
+# Phase-12 sweep: schedule × controller (combine mode + sigmoid floor)
+# ---------------------------------------------------------------------
+
+
+# Anchor for the phase_f04 controller (= phase-9 winner config).
+_PHASE_F04: Dict[str, Any] = dict(
+    _PD_BEST,
+    mode="two_phase_switch",
+    edit_fraction=0.40,
+    kv_mix_edit=0.45,
+    kv_mix_preserve=0.90,
+    alpha_edit=0.30,
+)
+
+
+def phase12_configs(floor: float = 0.25) -> List[Dict[str, Any]]:
+    """
+    Phase-12 sweep: schedule × controller. Holds the drift signal at the
+    Phase-7/8 default (latent_init) and varies how the per-step inject
+    weight w(i) interacts with the controller's alpha. Two controller
+    families × three combine modes:
+
+    Combine modes
+      - current   : kv_eff = base_kv * alpha * sigmoid_w(i)
+                    (combine='multiply', floor=0.0 — same as pd_best)
+      - full_adp  : kv_eff = base_kv * alpha
+                    (combine='replace' — pure adaptive, no schedule)
+      - sched_floor : kv_eff = base_kv * alpha * max(sigmoid_w(i), 0.25)
+                    (combine='multiply', floor=0.25 — keeps the
+                    controller active where sigmoid has decayed)
+
+    Controllers
+      - pd_best   : single-objective PD, kv=0.30 (Phase-7/8 winner)
+      - phase_f04 : two_phase_switch, edit_fraction=0.40,
+                    kv_mix_edit=0.45, kv_mix_preserve=0.90,
+                    alpha_edit=0.30 (Phase-9 winner)
+
+    Total: 6 rows.
+    """
+    def _ctrl(base, mode_label):
+        if mode_label == "current":
+            over = dict(combine="multiply", inject_weight_floor=0.0)
+        elif mode_label == "full_adaptive":
+            over = dict(combine="replace", inject_weight_floor=0.0)
+        elif mode_label == "sched_floor":
+            over = dict(combine="multiply", inject_weight_floor=floor)
+        else:
+            raise ValueError(mode_label)
+        return {**base, **over}
+
+    rows: List[Dict[str, Any]] = []
+    for ctrl_name, ctrl_base in (("pd_best", _PD_BEST),
+                                 ("phase_f04", _PHASE_F04)):
+        rows.append({"name": f"{ctrl_name}_current",
+                     **_ctrl(ctrl_base, "current")})
+        rows.append({"name": f"{ctrl_name}_full_adaptive",
+                     **_ctrl(ctrl_base, "full_adaptive")})
+        rows.append({"name": f"{ctrl_name}_sched_floor_{floor:.2f}",
+                     **_ctrl(ctrl_base, "sched_floor")})
+    return rows
+
+
 def calibrate_drift_signals(
     *,
     t5, clip, model, ae,
@@ -483,6 +546,8 @@ def _cfg_knobs(cfg: Dict[str, Any]) -> Dict[str, Any]:
         "kv_mix_ratio":    cfg.get("kv_mix_ratio", ""),
         "target_drift":    cfg.get("target_drift", ""),
         "drift_metric":    cfg.get("drift_metric", ""),
+        "combine":            cfg.get("combine", ""),
+        "inject_weight_floor": cfg.get("inject_weight_floor", ""),
         "ls_ratio":        cfg.get("ls_ratio", ""),
         "kp":              cfg.get("kp", ""),
         "kd":              cfg.get("kd", ""),
@@ -568,6 +633,7 @@ def _write_csv(summary_rows: List[Dict[str, Any]], csv_path: str) -> None:
     fixed = [
         "name", "status", "n_ok", "n_total", "time_min",
         "mode", "kv_mix_ratio", "target_drift", "drift_metric",
+        "combine", "inject_weight_floor",
         "ls_ratio", "kp", "kd",
         "use_soft_mask", "use_adaptive_kv", "use_channel_ls",
         "edit_pres_ratio", "edit_drift_metric",

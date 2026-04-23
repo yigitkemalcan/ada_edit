@@ -87,6 +87,9 @@ def denoise_fireflow_adaptive(
     )
 
     base_kv = float(info["kv_mix_ratio"])
+    w_floor = float(info.get("inject_weight_floor", 0.0))
+    if w_floor > 0.0:
+        inject_weights = [max(float(w), w_floor) for w in inject_weights]
 
     guidance_vec = torch.full(
         (img.shape[0],), guidance, device=img.device, dtype=img.dtype

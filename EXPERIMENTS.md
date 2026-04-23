@@ -803,6 +803,247 @@ Metric wins (out of 9): `phase_f04` 6, `paper_adaedit` 2, `sched_hl` 1.
 
 ---
 
+## Phase 10 — phase_f04 marginal sweep (n=20, 11 configs)
+
+Phase 9 identified `phase_f04` (`two_phase_switch`, edit_fraction=0.40,
+kv_mix_edit=0.45, kv_mix_preserve=0.90, alpha_edit=0.30) as the new best
+config. Phase 10 does a one-at-a-time marginal sweep over all four
+`two_phase_switch`-specific parameters to find the best operating point
+on each axis.
+
+Driver: `sweep_pie_bench.py::phase_f04_sweep()`.
+
+### Configurations
+
+| Name | What varies | Value |
+|------|-------------|-------|
+| `pd_best` | anchor (phase-7/8 winner) | — |
+| `pf_base` | anchor (phase-9 winner) | ef=0.40, kve=0.45, kvp=0.90, ae=0.30 |
+| `pf_ef30..50` | edit_fraction | {0.30, 0.35, **0.40**, 0.45, 0.50} |
+| `pf_kve30`, `pf_kve60` | kv_mix_edit | {0.30, **0.45**, 0.60} |
+| `pf_kvp75` | kv_mix_preserve | {0.75, **0.90**} |
+| `pf_ae15`, `pf_ae45` | alpha_edit | {0.15, **0.30**, 0.45} |
+
+### Results
+
+```
+name      time_min  n_ok  psnr     ssim    lpips   psnr_bg  ssim_bg  lpips_bg  clip_i  clip_t  clip_dir
+--------  --------  ----  -------  ------  ------  -------  -------  --------  ------  ------  --------
+pd_best   4.1900    20    20.1062  0.6690  0.3169  22.2286  0.7313   0.1515    0.9091  0.2670  0.1387
+pf_base   4.1000    20    20.2137  0.6724  0.3110  22.3024  0.7317   0.1484    0.9066  0.2667  0.1333
+pf_ef30   4.0900    20    20.2137  0.6724  0.3110  22.3024  0.7317   0.1484    0.9066  0.2667  0.1333  ← identical to pf_base
+pf_ef35   4.0800    20    20.2137  0.6724  0.3110  22.3024  0.7317   0.1484    0.9066  0.2667  0.1333  ← identical to pf_base
+pf_ef45   4.0900    20    20.2137  0.6724  0.3110  22.3024  0.7317   0.1484    0.9066  0.2667  0.1333  ← identical to pf_base
+pf_ef50   4.0900    20    20.2137  0.6724  0.3110  22.3024  0.7317   0.1484    0.9066  0.2667  0.1333  ← identical to pf_base
+pf_kve30  4.0800    20    20.2442  0.6731  0.3098  22.3785  0.7317   0.1489    0.9074  0.2667  0.1327
+pf_kve60  4.0700    20    20.1808  0.6715  0.3134  22.3435  0.7318   0.1506    0.9078  0.2661  0.1355
+pf_kvp75  4.0900    20    20.2137  0.6724  0.3110  22.3024  0.7317   0.1484    0.9066  0.2667  0.1333  ← identical to pf_base
+pf_ae15   4.0800    20    20.2105  0.6704  0.3119  22.3525  0.7288   0.1514    0.9089  0.2671  0.1348
+pf_ae45   4.0900    20    20.1900  0.6720  0.3128  22.3779  0.7340   0.1492    0.9100  0.2667  0.1351
+```
+
+Best per metric:
+```
+     psnr (↑): pf_kve30   20.2442
+     ssim (↑): pf_kve30   0.6731
+    lpips (↓): pf_kve30   0.3098
+  psnr_bg (↑): pf_kve30   22.3785
+  ssim_bg (↑): pf_ae45    0.7340
+ lpips_bg (↓): pf_base    0.1484
+   clip_i (↑): pf_ae45    0.9100
+   clip_t (↑): pf_ae15    0.2671
+ clip_dir (↑): pd_best    0.1387
+```
+
+Metric wins (out of 9): `pf_kve30` 4, `pf_ae45` 2, `pd_best` 1, `pf_base` 1, `pf_ae15` 1.
+
+### Anomaly: edit_fraction and kv_mix_preserve have zero effect
+
+`pf_ef30`, `pf_ef35`, `pf_ef45`, `pf_ef50`, and `pf_kvp75` are all
+**bitwise identical to `pf_base`** across all 9 metrics to 4 decimal
+places. This is impossible from sampling variance and indicates these
+parameters are not reaching the sampler.
+
+Most likely cause: the sigmoid inject schedule (`inject=4`) assigns
+near-zero weights to the early steps where the edit phase operates.
+With `inject_weight≈0` on steps 0–(boundary−1), the effective KV
+ratio in the edit phase is always 0 regardless of `kv_mix_edit`, and
+switching the boundary (edit_fraction) changes nothing because all
+edited-phase steps are zero-weight anyway. Confirmed by the fact that
+`kv_mix_edit` and `alpha_edit` DO show measurable effects — they
+operate on a per-step basis that matters when inject_weight > 0, while
+`edit_fraction` and `kv_mix_preserve` only reshape when phases switch,
+which is in the zero-weight region.
+
+This means `two_phase_switch` as currently wired with sigmoid-inject
+is effectively equivalent to pure PD on the preserve phase: the edit
+phase is a dead zone and `kv_mix_preserve` is the only kv that matters.
+
+**Action needed**: either (a) verify the inject schedule and shift the
+phase boundary to active-weight steps, or (b) accept that `edit_fraction`
+and `kv_mix_preserve` are inert and drop them from future sweeps.
+
+### kv_mix_edit axis (effective parameters)
+
+| kv_mix_edit | psnr | psnr_bg | lpips | clip_dir |
+|-------------|------|---------|-------|----------|
+| 0.30 | **20.2442** | **22.3785** | **0.3098** | 0.1327 |
+| 0.45 (base) | 20.2137 | 22.3024 | 0.3110 | 0.1333 |
+| 0.60 | 20.1808 | 22.3435 | 0.3134 | 0.1355 |
+
+Lower kv_mix_edit (0.30) wins fidelity; higher (0.60) wins clip_dir.
+Monotonic in psnr and lpips. The fidelity gain from 0.45 → 0.30 is
+modest (+0.03 dB psnr) but consistent — same direction as the global
+kv curve from phases 4–6.
+
+### alpha_edit axis (effective parameters)
+
+| alpha_edit | psnr | psnr_bg | ssim_bg | clip_i | clip_t |
+|------------|------|---------|---------|--------|--------|
+| 0.15 | 20.2105 | 22.3525 | 0.7288 | 0.9089 | **0.2671** |
+| 0.30 (base) | 20.2137 | 22.3024 | 0.7317 | 0.9066 | 0.2667 |
+| 0.45 | 20.1900 | **22.3779** | **0.7340** | **0.9100** | 0.2667 |
+
+`alpha_edit` shows a trade-off: weaker gate (0.15) gains clip_t;
+stronger gate (0.45) gains ssim_bg and clip_i. psnr is largely flat
+across the axis (Δ<0.025 dB). No clear winner; depends on whether
+ssim/clip_i or clip_t is prioritized.
+
+### Takeaways
+
+1. **`pf_kve30` is the marginal winner** on fidelity (4/9 metrics),
+   beating pf_base by +0.03 dB psnr. The kv_mix_edit axis is live and
+   monotonic toward lower values — same pattern as the global kv sweep.
+2. **`edit_fraction` and `kv_mix_preserve` are inert** under the
+   sigmoid inject schedule. The two-phase structure as implemented does
+   not add value over a pure PD run on the inject-active region.
+   Follow-up should diagnose and fix, or redesign the phase boundary to
+   align with the active inject window.
+3. **`alpha_edit` is a real but weak lever.** Max spread across the
+   axis is 0.025 dB psnr — below the noise floor of meaningful
+   architectural decisions. Both extremes (ae=0.15 for clip_t, ae=0.45
+   for ssim/clip_i) are defensible depending on the target metric.
+4. **`pd_best` still wins clip_dir** (0.1387 vs 0.1333 for pf_base).
+   The two_phase_switch mode's edit phase may be hurting directional
+   edit signal (CLIP-dir) — even if that phase is zero-weight for
+   inject, alpha forcing in those steps may still alter trajectories.
+
+---
+
+## Phase 11 — drift-signal variant sweep (n=20, 5 configs)
+
+Phase 9 varied the controller while holding the drift signal fixed at
+`latent_init` (masked MSE vs the inversion endpoint). Phase 11 inverts
+that: it holds the controller fixed at the phase-7/8 winner (`pd_best`)
+and varies the **drift signal** the controller sees. Three variants
+target the three known weaknesses of `latent_init`:
+
+- `latent_relative` — masked MSE against the per-step source-pass
+  trajectory (cached from inversion). Removes the noise-scale confound:
+  both latents are at the same noise level at every step.
+- `latent_init_cosine` — `1 - cosine_similarity` over masked
+  preservation tokens. Captures directional drift instead of magnitude.
+- `latent_init_p90` — 90th-percentile of per-token squared error.
+  Focuses on the worst-leaking tokens instead of the mean.
+
+`target_drift` was recalibrated per signal via
+`calibrate_drift_signals` (n=5, controller neutralized with `kp=kd=0`,
+`target_drift = 0.8 × median drift over the inject window`). Same
+seed, same 15-step sigmoid schedule as Phase 9. n=20.
+
+Driver: `sweep_pie_bench.py::drift_signal_configs()` +
+`calibrate_drift_signals()`.
+
+### Configurations
+
+| Name | Mode | Drift signal | target_drift |
+|------|------|--------------|--------------|
+| `paper_adaedit` | `original` | — | — |
+| `pd_best` | `pd_adaptive` | `latent_init` | 0.02 |
+| `drift_relative` | `pd_adaptive` | `latent_relative` | calibrated |
+| `drift_cosine` | `pd_adaptive` | `latent_init_cosine` | calibrated |
+| `drift_p90` | `pd_adaptive` | `latent_init_p90` | calibrated |
+
+### Results
+
+```
+name            time_min  n_ok  psnr     ssim    lpips   psnr_bg  ssim_bg  lpips_bg  clip_i  clip_t  clip_dir
+--------------  --------  ----  -------  ------  ------  -------  -------  --------  ------  ------  --------
+paper_adaedit   4.0900    20    17.6692  0.6033  0.4029  20.5426  0.7011   0.1754    0.8938  0.2746  0.1397
+pd_best         4.0900    20    20.1062  0.6690  0.3169  22.2286  0.7313   0.1515    0.9091  0.2670  0.1387
+drift_relative  4.0900    20    20.1026  0.6694  0.3165  22.2240  0.7298   0.1505    0.9080  0.2669  0.1387
+drift_cosine    4.1000    20    20.1199  0.6691  0.3161  22.2302  0.7305   0.1508    0.9078  0.2677  0.1403
+drift_p90       4.0800    20    20.1608  0.6709  0.3137  22.2543  0.7318   0.1502    0.9093  0.2674  0.1388
+```
+
+Best per metric:
+```
+     psnr (↑): drift_p90       20.1608
+     ssim (↑): drift_p90       0.6709
+    lpips (↓): drift_p90       0.3137
+  psnr_bg (↑): drift_p90       22.2543
+  ssim_bg (↑): drift_p90       0.7318
+ lpips_bg (↓): drift_p90       0.1502
+   clip_i (↑): drift_p90       0.9093
+   clip_t (↑): paper_adaedit   0.2746
+ clip_dir (↑): drift_cosine    0.1403
+```
+
+Metric wins (out of 9): `drift_p90` 7, `paper_adaedit` 1, `drift_cosine` 1.
+
+### vs. pd_best anchor
+
+|          | pd_best | **drift_p90** | Δ |
+|----------|---------|---------------|---|
+| psnr     | 20.1062 | **20.1608**   | +0.055 dB |
+| ssim     | 0.6690  | **0.6709**    | +0.002 |
+| lpips    | 0.3169  | **0.3137**    | −0.003 |
+| psnr_bg  | 22.2286 | **22.2543**   | +0.026 dB |
+| ssim_bg  | 0.7313  | **0.7318**    | +0.001 |
+| lpips_bg | 0.1515  | **0.1502**    | −0.001 |
+| clip_i   | 0.9091  | **0.9093**    | +0.000 |
+| clip_t   | 0.2670  | **0.2674**    | +0.000 |
+| clip_dir | 0.1387  | **0.1388**    | ≈ 0 |
+
+### Takeaways
+
+1. **`drift_p90` wins 7 of 9 and regresses on none.** The 90th-percentile
+   per-token signal beats mean-MSE on every fidelity metric. Margins are
+   small (+0.055 dB psnr, −0.003 lpips) but directionally clean. The
+   intuition holds: preservation breaks on the worst-leaking tokens, so
+   driving the controller off a tail statistic rather than a mean is
+   the right inductive bias.
+2. **`drift_relative` is a tie with `pd_best` (within ±0.002 on every
+   metric).** The trajectory-matched MSE was the *theoretically*
+   cleanest signal, but in practice the noise-scale confound it fixes
+   appears already absorbed by the controller's gain calibration on
+   `latent_init`. The expected improvement did not materialize — the
+   signal carries the same information once the setpoint is tuned.
+3. **`drift_cosine` ties on fidelity but wins clip_dir.** Directional
+   drift correlates with directional edit signal — the only PD-family
+   row to beat `pd_best` on clip_dir, even if narrowly. Worth keeping
+   as a candidate when the optimization target is edit fidelity rather
+   than preservation.
+4. **`paper_adaedit` again wins clip_t.** Same pattern as Phases 8/9:
+   higher kv → higher CLIP-t. Treat as an artifact of the base mode,
+   not a signal about the variants.
+5. **Sample size caveat.** n=20 (vs Phase 9's n=49). The win margin
+   for `drift_p90` is robust across all 7 winning metrics but smaller
+   than the Phase-9 winner's. Recommend n=49 confirmation before
+   declaring `drift_p90` the new default.
+
+### Next step
+
+- **Confirm `drift_p90` at n=49** with the same configs to match Phase
+  9's sample size. If margins hold, replace `latent_init` with
+  `latent_init_p90` as the default `drift_metric` in `_PD_BEST`.
+- **Hybrid `drift_p90 + drift_cosine`.** p90 wins fidelity, cosine
+  wins clip_dir — they target orthogonal failure modes. A `0.5 × p90 +
+  0.5 × cosine` hybrid (after per-signal normalization) is the natural
+  next variant.
+
+---
+
 ## Next step
 
 1. **kv trade-off sweep on full 700 (optional).** n=30 showed

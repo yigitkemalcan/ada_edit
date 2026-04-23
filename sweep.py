@@ -139,6 +139,7 @@ def _build_args(
         ("alpha_max",      "--alpha_max"),
         ("drift_metric",   "--drift_metric"),
         ("combine",        "--combine"),
+        ("inject_weight_floor", "--inject_weight_floor"),
         # v2 knobs (only relevant for v2 modes, ignored otherwise)
         ("kp_p",            "--kp_p"),
         ("kd_p",            "--kd_p"),

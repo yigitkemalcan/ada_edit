@@ -191,6 +191,7 @@ def run(args, *, t5=None, clip=None, model=None, ae=None, gt_mask=None):
         "use_channel_ls": args.use_channel_ls,
         "channel_ls_temp": args.channel_ls_temp,
         "inject_schedule": args.inject_schedule,
+        "inject_weight_floor": float(args.inject_weight_floor),
     }
 
     timesteps = get_schedule(
@@ -501,6 +502,13 @@ def build_parser():
         choices=["multiply", "replace"],
         help="'multiply' -> delta = base * alpha * w(i); "
              "'replace' -> delta = base * alpha",
+    )
+    p.add_argument(
+        "--inject_weight_floor", default=0.0, type=float,
+        help="Floor applied to the per-step inject weight w(i) before "
+             "the combine step (combine='multiply' only). 0 disables the "
+             "floor; e.g. 0.25 keeps the controller active even where "
+             "the sigmoid schedule has nearly decayed.",
     )
     p.add_argument("--kp", default=1.0, type=float)
     p.add_argument("--ki", default=0.1, type=float)

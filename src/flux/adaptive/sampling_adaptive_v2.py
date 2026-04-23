@@ -118,6 +118,9 @@ def _prep_step_common(info, num_steps: int):
     inject_weights = get_progressive_inject_schedule(
         num_steps, info["inject_step"], schedule_type
     )
+    w_floor = float(info.get("inject_weight_floor", 0.0))
+    if w_floor > 0.0:
+        inject_weights = [max(float(w), w_floor) for w in inject_weights]
     base_kv = float(info["kv_mix_ratio"])
     indices = info.get("indices", None)
     if not torch.is_tensor(indices):
