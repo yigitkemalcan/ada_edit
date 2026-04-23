@@ -179,110 +179,56 @@ _PD_BEST: Dict[str, Any] = dict(
 
 def v2_configs() -> List[Dict[str, Any]]:
     """
-    Grid used by the v2 70-sample PIE-Bench sweep. Anchors:
-      - baseline          : vanilla FLUX, minimal injection
-      - paper_adaedit     : paper config with 3 extensions
-      - pd_best           : current phase-8 winner (single-objective PD)
-    Followed by parameter sweeps over each of the 5 v2 variants.
+    Lean v2 PIE-Bench sweep: 7 configs — 2 anchors plus one
+    representative per variant family. Picks the middle-of-the-grid
+    defaults so the sweep is a fair "best-shot" comparison; once a
+    family is identified as promising here, a follow-up sweep can
+    widen the grid around that variant.
+
+    Configs (7):
+      - paper_adaedit  : original method with all 3 AdaEdit extensions
+      - pd_best        : current v1 winner (single-objective PD)
+      - dual_r3        : variant A (edit_pres_ratio=3)
+      - phase_f04      : variant B (edit_fraction=0.4)
+      - asym_45_90     : variant C (kv_mix_edit=0.45 / preserve=0.9)
+      - sched_hl       : variant D (cosine_high_low profile)
+      - xattn_07       : variant E (release_factor=0.7)
     """
-    cfgs: List[Dict[str, Any]] = []
-
-    # --- anchors (3) ------------------------------------------------
-    cfgs.append({
-        "name": "baseline",
-        "mode": "original",
-        "kv_mix_ratio": 0.9,
-        "ls_ratio": 0.25,
-    })
-    cfgs.append({
-        "name": "paper_adaedit",
-        "mode": "original",
-        "kv_mix_ratio": 0.9,
-        "ls_ratio": 0.25,
-        **_EXT_ON,
-    })
-    cfgs.append({
-        "name": "pd_best",
-        **_PD_BEST,
-    })
-
-    # Shared base for most v2 configs: the winning pd_best knobs,
-    # with the mode overridden per variant.
+    # Shared base for v2 rows: the winning pd_best knobs with mode
+    # overridden per variant.
     def _pd(**over):
         out = dict(_PD_BEST)
         out.update(over)
         return out
 
-    # --- variant A: dual_objective (4) ------------------------------
-    cfgs.append({"name": "dual_r2",
-                 **_pd(mode="dual_objective"),
-                 "edit_pres_ratio": 2.0})
-    cfgs.append({"name": "dual_r3",
-                 **_pd(mode="dual_objective"),
-                 "edit_pres_ratio": 3.0})
-    cfgs.append({"name": "dual_r5",
-                 **_pd(mode="dual_objective"),
-                 "edit_pres_ratio": 5.0})
-    cfgs.append({"name": "dual_norm",
-                 **_pd(mode="dual_objective"),
-                 "edit_pres_ratio": 3.0,
-                 "edit_drift_metric": "edit_normalized"})
+    return [
+        # --- anchors (2) ----
+        {"name": "paper_adaedit",
+         "mode": "original",
+         "kv_mix_ratio": 0.9,
+         "ls_ratio": 0.25,
+         **_EXT_ON},
+        {"name": "pd_best", **_PD_BEST},
 
-    # --- variant B: two_phase_switch (4) ----------------------------
-    cfgs.append({"name": "phase_f03",
-                 **_pd(mode="two_phase_switch"),
-                 "edit_fraction": 0.3,
-                 "kv_mix_edit": 0.45, "kv_mix_preserve": 0.9})
-    cfgs.append({"name": "phase_f04",
-                 **_pd(mode="two_phase_switch"),
-                 "edit_fraction": 0.4,
-                 "kv_mix_edit": 0.45, "kv_mix_preserve": 0.9})
-    cfgs.append({"name": "phase_f05",
-                 **_pd(mode="two_phase_switch"),
-                 "edit_fraction": 0.5,
-                 "kv_mix_edit": 0.45, "kv_mix_preserve": 0.9})
-    cfgs.append({"name": "phase_kvhi",
-                 **_pd(mode="two_phase_switch"),
-                 "edit_fraction": 0.4,
-                 "kv_mix_edit": 0.30, "kv_mix_preserve": 0.9})
-
-    # --- variant C: asymmetric_region (4) ---------------------------
-    cfgs.append({"name": "asym_45_90",
-                 **_pd(mode="asymmetric_region"),
-                 "kv_mix_edit": 0.45, "kv_mix_preserve": 0.9})
-    cfgs.append({"name": "asym_35_90",
-                 **_pd(mode="asymmetric_region"),
-                 "kv_mix_edit": 0.35, "kv_mix_preserve": 0.9})
-    cfgs.append({"name": "asym_50_85",
-                 **_pd(mode="asymmetric_region"),
-                 "kv_mix_edit": 0.50, "kv_mix_preserve": 0.85})
-    cfgs.append({"name": "asym_25_95",
-                 **_pd(mode="asymmetric_region"),
-                 "kv_mix_edit": 0.25, "kv_mix_preserve": 0.95})
-
-    # --- variant D: scheduled_target (3) ----------------------------
-    cfgs.append({"name": "sched_hl",
-                 **_pd(mode="scheduled_target"),
-                 "td_high": 0.08, "td_low": 0.015,
-                 "td_profile": "cosine_high_low"})
-    cfgs.append({"name": "sched_lh",
-                 **_pd(mode="scheduled_target"),
-                 "td_high": 0.015, "td_low": 0.08,
-                 "td_profile": "cosine_low_high"})
-    cfgs.append({"name": "sched_lin",
-                 **_pd(mode="scheduled_target"),
-                 "td_high": 0.08, "td_low": 0.015,
-                 "td_profile": "linear"})
-
-    # --- variant E: xattn_boost (2) ---------------------------------
-    cfgs.append({"name": "xattn_07",
-                 **_pd(mode="xattn_boost"),
-                 "release_factor": 0.7})
-    cfgs.append({"name": "xattn_05",
-                 **_pd(mode="xattn_boost"),
-                 "release_factor": 0.5})
-
-    return cfgs
+        # --- one representative per variant family (5) ----
+        {"name": "dual_r3",
+         **_pd(mode="dual_objective"),
+         "edit_pres_ratio": 3.0},
+        {"name": "phase_f04",
+         **_pd(mode="two_phase_switch"),
+         "edit_fraction": 0.4,
+         "kv_mix_edit": 0.45, "kv_mix_preserve": 0.9},
+        {"name": "asym_45_90",
+         **_pd(mode="asymmetric_region"),
+         "kv_mix_edit": 0.45, "kv_mix_preserve": 0.9},
+        {"name": "sched_hl",
+         **_pd(mode="scheduled_target"),
+         "td_high": 0.08, "td_low": 0.015,
+         "td_profile": "cosine_high_low"},
+        {"name": "xattn_07",
+         **_pd(mode="xattn_boost"),
+         "release_factor": 0.7},
+    ]
 
 
 def _cfg_knobs(cfg: Dict[str, Any]) -> Dict[str, Any]:

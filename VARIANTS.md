@@ -318,11 +318,11 @@ results = run_pie_sweep(
 )
 ```
 
-Grid (~21 configs, ~5 h on a single A100 incl. CLIP/LPIPS overhead):
+Lean grid (7 configs, ~1.7 h on a single A100 incl. CLIP/LPIPS overhead) — 2 anchors + one representative per variant family. Once a family proves promising here, widen the grid around it in a follow-up sweep.
 
 | anchors | A dual | B phase | C asym | D sched | E xattn |
 |---|---|---|---|---|---|
-| baseline, paper_adaedit, pd_best | 4 configs (ratio ∈ {2,3,5}, one `edit_normalized`) | 4 configs (edit_fraction ∈ {0.3,0.4,0.5}, one kv-high) | 4 configs (r_edit × r_preserve grid) | 3 configs (profile ∈ {high_low, low_high, linear}) | 2 configs (release_factor ∈ {0.7, 0.5}) |
+| paper_adaedit, pd_best | dual_r3 (ratio=3) | phase_f04 (edit_fraction=0.4) | asym_45_90 (r_edit=0.45, r_preserve=0.9) | sched_hl (cosine_high_low) | xattn_07 (release=0.7) |
 
 Output:
 - `outputs_v2_sweep/<config_name>/<sample_key>/{edited.jpg, metrics.json, adaptive_log.json}` — per-sample.
