@@ -454,6 +454,242 @@ def run_followup_sweep(
     )
 
 
+# ---------------------------------------------------------------------
+# v2 smoke test — run pd_best + all 5 new variants on one image
+# ---------------------------------------------------------------------
+
+def smoke_v2_configs() -> List[Dict[str, Any]]:
+    """
+    The 6 configs used by smoke_test_v2: pd_best anchor + one
+    representative config for each of the 5 v2 variants. These mirror
+    the middle-of-the-road defaults from sweep_pie_bench.v2_configs(),
+    so if a variant crashes on the notebook image it will also crash
+    in the full PIE-Bench sweep.
+    """
+    # All variants start from the current v1 winner's non-mode knobs.
+    base: Dict[str, Any] = dict(
+        kv_mix_ratio=0.30,
+        target_drift=0.02,
+        ls_ratio=0.45,
+        kp=1.5,
+        kd=0.2,
+        use_soft_mask=True,
+    )
+    return [
+        {"name": "pd_best", "mode": "pd_adaptive", **base},
+        {
+            "name": "dual_r3",
+            "mode": "dual_objective",
+            **base,
+            "kp_p": 1.5, "kd_p": 0.2, "kp_e": 1.0, "kd_e": 0.1,
+            "target_pres": 0.02, "edit_pres_ratio": 3.0,
+            "edit_drift_metric": "edit_init",
+        },
+        {
+            "name": "phase_f04",
+            "mode": "two_phase_switch",
+            **base,
+            "edit_fraction": 0.4, "alpha_edit": 0.3,
+            "kv_mix_edit": 0.45, "kv_mix_preserve": 0.9,
+            "phase_ramp_steps": 2,
+        },
+        {
+            "name": "asym_45_90",
+            "mode": "asymmetric_region",
+            **base,
+            "kv_mix_edit": 0.45, "kv_mix_preserve": 0.9,
+        },
+        {
+            "name": "sched_hl",
+            "mode": "scheduled_target",
+            **base,
+            "td_high": 0.08, "td_low": 0.015,
+            "td_profile": "cosine_high_low",
+        },
+        {
+            "name": "xattn_07",
+            "mode": "xattn_boost",
+            **base,
+            "target_xattn": 0.08,
+            "xattn_release_threshold": 0.02,
+            "release_factor": 0.7,
+        },
+    ]
+
+
+def _check_v2_log(run_dir: str, mode: str, num_steps: int) -> Dict[str, Any]:
+    """
+    Light inspection of adaptive_log.json for a single run. Returns a
+    dict of diagnostic flags the smoke-test printer uses.
+    """
+    info: Dict[str, Any] = {"mode": mode, "log_ok": False}
+    log_fn = os.path.join(run_dir, "adaptive_log.json")
+    if not os.path.exists(log_fn):
+        info["error"] = "missing adaptive_log.json"
+        return info
+    try:
+        with open(log_fn) as f:
+            payload = json.load(f)
+    except Exception as e:
+        info["error"] = f"unreadable log: {e}"
+        return info
+    per_step = payload.get("per_step", [])
+    info["n_steps"] = len(per_step)
+    info["steps_match"] = len(per_step) == num_steps
+
+    # Fields expected per variant (presence check on step 0).
+    expected = {
+        "pd_adaptive":       {"drift", "alpha", "kv_mix_ratio"},
+        "dual_objective":    {"drift_pres", "drift_edit", "alpha",
+                              "target_pres", "target_edit"},
+        "two_phase_switch":  {"drift", "alpha", "base_kv_t", "phase"},
+        "asymmetric_region": {"drift", "alpha",
+                              "kv_mix_edit", "kv_mix_preserve"},
+        "scheduled_target":  {"drift", "target_drift_t", "alpha"},
+        "xattn_boost":       {"drift", "alpha", "xattn_edit_score",
+                              "released"},
+    }.get(mode, set())
+    if per_step and expected:
+        keys0 = set(per_step[0].keys())
+        missing = expected - keys0
+        info["missing_fields"] = sorted(missing)
+    info["log_ok"] = True
+    return info
+
+
+def smoke_test_v2(
+    *,
+    source_img: str,
+    source_prompt: str,
+    target_prompt: str,
+    edit_object: str,
+    t5,
+    clip,
+    model,
+    ae,
+    edit_type: str = "change",
+    output_dir: str = "outputs_v2_smoke",
+    num_steps: int = 15,
+    seed: int = 42,
+    inject: int = 4,
+    inject_schedule: str = "sigmoid",
+    configs: Optional[List[Dict[str, Any]]] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Run the v1 PD winner plus all 5 v2 variants on a single image, then
+    print a compact per-variant report.
+
+    Parameters
+    ----------
+    source_img, source_prompt, target_prompt, edit_object : str
+        The editing task (same meaning as in adaedit_adaptive.py).
+    t5, clip, model, ae : torch modules
+        Pre-loaded models, passed through to ``run_sweep``.
+    edit_type : str
+        'change' / 'add' / 'remove' / 'style'. Default 'change'.
+    output_dir : str
+        Where each run writes its <run_name>/ folder.
+    configs : list of dict, optional
+        Override the 6-config default. Each dict needs a 'name' key.
+
+    Returns
+    -------
+    list[dict]
+        One row per config with metrics + status + diagnostic flags
+        from adaptive_log.json.
+
+    Notes
+    -----
+    After running, paste the printed summary block back into chat — the
+    per-variant flags (missing fields, step count, alpha min/max) are
+    enough to tell whether each variant's controller and log schema
+    are behaving correctly.
+    """
+    configs = configs or smoke_v2_configs()
+    print(f"Smoke-testing {len(configs)} configs on {source_img}")
+    print(f"  source: {source_prompt!r}")
+    print(f"  target: {target_prompt!r}")
+    print(f"  edit:   {edit_object!r} ({edit_type})")
+    print("-" * 72)
+
+    rows = run_sweep(
+        source_img=source_img,
+        source_prompt=source_prompt,
+        target_prompt=target_prompt,
+        edit_object=edit_object,
+        t5=t5, clip=clip, model=model, ae=ae,
+        output_dir=output_dir,
+        configs=configs,
+        num_steps=num_steps,
+        seed=seed,
+        inject=inject,
+        inject_schedule=inject_schedule,
+        edit_type=edit_type,
+    )
+
+    # Augment each row with log-schema diagnostics.
+    for row, cfg in zip(rows, configs):
+        run_dir = row.get("run_dir", "")
+        mode = cfg.get("mode", "pd_adaptive")
+        row["log_check"] = (
+            _check_v2_log(run_dir, mode, num_steps) if run_dir else
+            {"mode": mode, "log_ok": False, "error": "no run_dir"}
+        )
+        # Also surface per-step alpha range — useful sanity indicator.
+        try:
+            with open(os.path.join(run_dir, "adaptive_log.json")) as f:
+                log = json.load(f)
+            alphas = [s["alpha"] for s in log.get("per_step", [])
+                      if isinstance(s.get("alpha"), (int, float))]
+            row["alpha_min"] = round(min(alphas), 4) if alphas else None
+            row["alpha_max"] = round(max(alphas), 4) if alphas else None
+        except Exception:
+            row["alpha_min"] = row["alpha_max"] = None
+
+    _print_v2_smoke_summary(rows)
+    return rows
+
+
+def _print_v2_smoke_summary(rows: List[Dict[str, Any]]) -> None:
+    """Compact table + per-variant diagnostics for smoke_test_v2."""
+    print("\n" + "=" * 100)
+    print("V2 SMOKE TEST SUMMARY")
+    print("=" * 100)
+    hdr = f"{'name':<14} {'mode':<20} {'status':<8} {'psnr':>6} {'ssim':>6} {'lpips':>6} " \
+          f"{'clip_t':>7} {'clip_dir':>8} {'α_min':>6} {'α_max':>6} {'steps':>5} {'log':>4}"
+    print(hdr)
+    print("-" * len(hdr))
+    for r in rows:
+        lc = r.get("log_check", {})
+        missing = lc.get("missing_fields", [])
+        log_flag = "OK" if lc.get("log_ok") and not missing else "FAIL"
+        step_str = f"{lc.get('n_steps','-')}/{15 if lc.get('steps_match') else '?'}"
+        line = (
+            f"{r.get('name','-'):<14} "
+            f"{r.get('mode','-'):<20} "
+            f"{('OK' if r.get('status') == 'ok' else 'FAIL'):<8} "
+            f"{_fmt_cell(r.get('psnr')):>6} "
+            f"{_fmt_cell(r.get('ssim')):>6} "
+            f"{_fmt_cell(r.get('lpips')):>6} "
+            f"{_fmt_cell(r.get('clip_t')):>7} "
+            f"{_fmt_cell(r.get('clip_dir')):>8} "
+            f"{_fmt_cell(r.get('alpha_min')):>6} "
+            f"{_fmt_cell(r.get('alpha_max')):>6} "
+            f"{step_str:>5} "
+            f"{log_flag:>4}"
+        )
+        print(line)
+
+    # Per-variant missing-field warnings (only if any).
+    for r in rows:
+        lc = r.get("log_check", {})
+        missing = lc.get("missing_fields", [])
+        if missing:
+            print(f"  ! {r['name']} missing log fields: {missing}")
+        if not r.get("status", "").startswith("ok"):
+            print(f"  ! {r['name']} run failed: {r.get('status')}")
+
+
 if __name__ == "__main__":
     raise SystemExit(
         "sweep.py is meant to be imported from a notebook where "
