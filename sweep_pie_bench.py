@@ -430,6 +430,97 @@ def phase12_configs(floor: float = 0.25) -> List[Dict[str, Any]]:
     return rows
 
 
+# ---------------------------------------------------------------------
+# Phase-13 sweep: best-of-all-worlds config × kv_mix_ratio
+# ---------------------------------------------------------------------
+
+
+# Orthogonal winners stacked: Phase-7/8 soft_mask base + Phase-11 p90
+# drift signal + Phase-12 full_adaptive (combine=replace). kv is swept.
+_BEST_BASE: Dict[str, Any] = dict(
+    _PD_BEST,
+    drift_metric="latent_init_p90",
+    combine="replace",
+    inject_weight_floor=0.0,
+)
+
+
+def best_kv_configs(
+    target_drifts: Dict[float, float],
+    include_dual: bool = True,
+    dual_edit_pres_ratio: float = 3.0,
+    kv_grid: Optional[List[float]] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Phase-13 sweep: best stack across kv_mix_ratio.
+
+    Stacks the orthogonal wins identified across prior phases:
+      - Phase 7/8: soft_mask on; channel_ls + adaptive_kv off.
+      - Phase 11: drift_metric = latent_init_p90 (robust worst-token).
+      - Phase 12: combine = replace (full adaptive, drops sigmoid envelope).
+      - Phase 13: kv_mix_ratio swept over {0.30, 0.40, 0.50, 0.60, 0.75, 0.90}.
+
+    Each kv row needs its own calibrated ``target_drift`` (p90 scale
+    shifts with kv). ``target_drifts`` maps kv -> target_drift;
+    populate via ``calibrate_drift_signals(base_cfg={**_BEST_BASE,
+    'kv_mix_ratio': kv})`` for each kv.
+
+    When ``include_dual=True``, appends two rows stacking
+    ``mode='dual_objective'`` on the best config — the Phase-9
+    ``dual_r3`` variant won clip_t/clip_dir within the PD family and
+    its mechanism is independent of the sigmoid, so it's the only
+    Phase-9 mode worth stacking. Rows land at kv=0.30 and kv=0.60
+    (near-endpoint check + mid-range stack).
+
+    Rows (8 core + 2 optional dual):
+      - paper_adaedit            (anchor; original, kv=0.90)
+      - pd_best                  (anchor; Phase-7/8 winner)
+      - best_kv0.30 ... best_kv0.90   (6 rows, best stack × kv)
+      - best_dual_kv0.30, best_dual_kv0.60  (2 optional rows)
+    """
+    if kv_grid is None:
+        kv_grid = [0.30, 0.40, 0.50, 0.60, 0.75, 0.90]
+
+    missing = [kv for kv in kv_grid if kv not in target_drifts]
+    if missing:
+        raise ValueError(
+            f"target_drifts missing entries for kv={missing}; "
+            "run calibrate_drift_signals(base_cfg=...) per kv first."
+        )
+
+    rows: List[Dict[str, Any]] = [
+        {"name": "paper_adaedit",
+         "mode": "original",
+         "kv_mix_ratio": 0.9,
+         "ls_ratio": 0.25,
+         **_EXT_ON},
+        {"name": "pd_best", **_PD_BEST},
+    ]
+
+    for kv in kv_grid:
+        rows.append({
+            "name": f"best_kv{kv:.2f}",
+            **_BEST_BASE,
+            "kv_mix_ratio": kv,
+            "target_drift": target_drifts[kv],
+        })
+
+    if include_dual:
+        for kv in (0.30, 0.60):
+            if kv not in target_drifts:
+                continue
+            rows.append({
+                "name": f"best_dual_kv{kv:.2f}",
+                **_BEST_BASE,
+                "mode": "dual_objective",
+                "kv_mix_ratio": kv,
+                "target_drift": target_drifts[kv],
+                "edit_pres_ratio": dual_edit_pres_ratio,
+            })
+
+    return rows
+
+
 def calibrate_drift_signals(
     *,
     t5, clip, model, ae,
@@ -446,34 +537,41 @@ def calibrate_drift_signals(
     include_categories: Optional[List[int]] = None,
     exclude_categories: Optional[List[int]] = (8,),
     data_root: Optional[str] = None,
+    base_cfg: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, float]:
     """
     Calibrate ``target_drift`` for each candidate drift signal.
 
-    For each metric, runs `_PD_BEST` with the controller neutralized
-    (kp=0, kd=0) on `n` PIE-Bench samples — alpha stays at base_alpha,
-    so the kv schedule matches an unmodified `pd_best` and we just
-    *observe* the drift trajectory. Per sample, we take the median
-    drift across steps where ``inject_weight > inject_weight_threshold``
-    (the injection window), then take the median of those across
-    samples (median-of-medians, robust to outliers). The returned
-    target_drift is ``target_ratio * pooled_median``.
+    For each metric, runs a neutralized (``kp=kd=0``) controller on `n`
+    PIE-Bench samples — alpha stays at ``base_alpha`` so the kv schedule
+    matches an unmodified target config and we just *observe* the drift
+    trajectory. Per sample, we take the median drift across steps where
+    ``inject_weight > inject_weight_threshold`` (the injection window),
+    then median-of-medians across samples. The returned target_drift is
+    ``target_ratio * pooled_median``.
+
+    ``base_cfg`` (default ``_PD_BEST``) is the config shape used during
+    calibration — use this to calibrate under the same combine mode,
+    kv_mix_ratio, mode, etc. that the downstream sweep will run. The
+    metric name and ``kp=kd=0`` overrides are applied on top.
 
     Returns a dict mapping each metric name to its calibrated
     ``target_drift``. Values are ready to plug into
-    ``drift_signal_configs(td_relative=..., td_cosine=..., td_p90=...)``.
+    ``drift_signal_configs`` or ``best_kv_configs``.
     """
     import json
     import statistics
 
     if metrics is None:
         metrics = ["latent_relative", "latent_init_cosine", "latent_init_p90"]
+    if base_cfg is None:
+        base_cfg = _PD_BEST
 
     os.makedirs(output_dir, exist_ok=True)
     calibrated: Dict[str, float] = {}
 
     for metric in metrics:
-        cfg = dict(_PD_BEST)
+        cfg = dict(base_cfg)
         cfg.update(
             name=f"calib_{metric}",
             drift_metric=metric,

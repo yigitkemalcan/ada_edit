@@ -1044,6 +1044,119 @@ Metric wins (out of 9): `drift_p90` 7, `paper_adaedit` 1, `drift_cosine` 1.
 
 ---
 
+## Phase 12 — schedule × controller sweep (n=20, 6 configs)
+
+Tests how the adaptive controller's alpha should interact with the
+progressive sigmoid inject schedule. Three combine modes × two
+controllers.
+
+**Combine modes**
+
+- `current`         — `kv_eff = base_kv · α · w(i)`
+                      (combine=multiply, floor=0.0). The default.
+- `full_adaptive`   — `kv_eff = base_kv · α`
+                      (combine=replace, no schedule). Pure controller.
+- `sched_floor_0.25`— `kv_eff = base_kv · α · max(w(i), 0.25)`
+                      (combine=multiply, floor=0.25). Prevents the
+                      schedule from decaying to zero in late steps.
+
+**Controllers**: `pd_best` (Phase-7/8 winner) and `phase_f04` (Phase-9
+winner).
+
+Driver: `sweep_pie_bench.py::phase12_configs()` +
+`--inject_weight_floor` CLI knob; floor applied in
+`sampling_adaptive.py` and `sampling_adaptive_v2.py::_prep_step_common`.
+
+### Results
+
+```
+name                        time_min  n_ok  psnr     ssim    lpips   psnr_bg  ssim_bg  lpips_bg  clip_i  clip_t  clip_dir
+--------------------------  --------  ----  -------  ------  ------  -------  -------  --------  ------  ------  --------
+pd_best_current             4.36      20    20.1062  0.6690  0.3169  22.2286  0.7313   0.1515    0.9091  0.2670  0.1387
+pd_best_full_adaptive       4.07      20    19.9964  0.6654  0.3210  22.1044  0.7281   0.1527    0.9049  0.2694  0.1418
+pd_best_sched_floor_0.25    4.78      20    31.5129  0.9218  0.0247  33.8210  0.9297   0.0119    0.9931  0.2414  0.0022
+phase_f04_current           4.05      20    20.2137  0.6724  0.3110  22.3024  0.7317   0.1484    0.9066  0.2667  0.1333
+phase_f04_full_adaptive     4.06      20    20.1654  0.6708  0.3139  22.2402  0.7313   0.1507    0.9094  0.2668  0.1360
+phase_f04_sched_floor_0.25  4.78      20    31.3699  0.9206  0.0255  33.8309  0.9288   0.0122    0.9926  0.2411  0.0015
+```
+
+### Takeaways
+
+1. **`sched_floor_0.25` is a degenerate configuration, not a winner.**
+   Both floor rows have `clip_dir ≈ 0.002`, a ~60× collapse vs the
+   current default's 0.1387. clip_dir measures whether the output moves
+   in the prompted edit direction — near-zero means *the edit did not
+   happen*. The stratospheric PSNR/SSIM/LPIPS and clip_i ≈ 0.99 are
+   identity-preservation metrics reporting that the output is nearly
+   the source image. Mechanism: the sigmoid drops `w(i) → 0` in late
+   steps precisely so the model can denoise without source-KV leak —
+   that is where the edit manifests. Forcing `w(i) ≥ 0.25` during
+   those steps continuously injects source KV and strangles the edit.
+   Preservation through inaction. **Do not adopt.**
+
+2. **`full_adaptive` is a real, non-degenerate shift on edit signal.**
+   Dropping the schedule (combine=replace) improves both clip_t and
+   clip_dir for both controllers, at a small fidelity cost:
+
+   | | clip_t | clip_dir | psnr | lpips |
+   |---|---|---|---|---|
+   | pd_best_current         | 0.2670 | 0.1387 | 20.1062 | 0.3169 |
+   | pd_best_full_adaptive   | **0.2694** | **0.1418** | 19.9964 | 0.3210 |
+   | phase_f04_current       | 0.2667 | 0.1333 | 20.2137 | 0.3110 |
+   | phase_f04_full_adaptive | 0.2668 | **0.1360** | 20.1654 | 0.3139 |
+
+   Margins are small (+0.002–0.003 clip_t, +0.003 clip_dir, −0.1 dB
+   psnr) but directionally consistent across both controllers. This
+   suggests the sigmoid envelope was suppressing the controller's
+   ability to drive edit signal in mid-trajectory steps.
+
+3. **`phase_f04_current` is still the best all-round single-row on
+   fidelity.** 20.21 psnr, 22.30 psnr_bg, 0.311 lpips. If the priority
+   is the preservation-heavy framing, this remains the candidate.
+
+### Can we beat AdaEdit on all 9 metrics?
+
+Short answer: **not with a single kv=0.30-family config.** `paper_adaedit`
+wins clip_t by a structural margin in every phase — higher `kv_mix_ratio
+= 0.9` keeps text-conditioning stronger during injection. Our PD family
+runs at kv=0.30.
+
+Head-to-head of the best Phase-12 candidate (`pd_best_full_adaptive`)
+vs the Phase-11 `paper_adaedit` reproduction (n=20, same slice):
+
+|          | paper_adaedit | pd_best_full_adaptive | winner |
+|----------|---------------|------------------------|--------|
+| psnr     | 17.6692 | **19.9964** | ours +2.33 dB |
+| ssim     | 0.6033  | **0.6654**  | ours |
+| lpips    | 0.4029  | **0.3210**  | ours |
+| psnr_bg  | 20.5426 | **22.1044** | ours +1.56 dB |
+| ssim_bg  | 0.7011  | **0.7281**  | ours |
+| lpips_bg | 0.1754  | **0.1527**  | ours |
+| clip_i   | 0.8938  | **0.9049**  | ours |
+| **clip_t**   | **0.2746**  | 0.2694  | paper |
+| clip_dir | 0.1397  | **0.1418**  | ours (narrow) |
+
+**8 of 9 metrics cleanly, with a structural loss on clip_t.** That is
+the right number to report — a full-adaptive variant of `pd_best` is
+the honest "beats AdaEdit" candidate, with the caveat that clip_t
+trades down ~0.005 in exchange for +2.33 dB PSNR and +0.08 LPIPS.
+
+### Recommended path forward
+
+1. **Adopt `combine="replace"` as the default for the PD family.**
+   The edit-signal gain is real and the fidelity cost is smaller than
+   the noise floor of Phase-11 drift-signal differences.
+2. **To close the clip_t gap, test a kv trade-off sweep at higher kv.**
+   Phase 6 hinted clip_dir peaks at kv=0.60–0.65; clip_t likely moves
+   with it. `full_adaptive × kv ∈ {0.45, 0.60, 0.75}` on n=30 would
+   locate a config that beats `paper_adaedit` on all 9 metrics
+   simultaneously, at the cost of some PSNR margin.
+3. **Drop `sched_floor` from further sweeps.** It's a mechanistic
+   dead-end — any floor value large enough to affect the trajectory
+   also strangles the edit.
+
+---
+
 ## Next step
 
 1. **kv trade-off sweep on full 700 (optional).** n=30 showed

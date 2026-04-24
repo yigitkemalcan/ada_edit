@@ -1,8 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(python3 *)",
-      "Bash(grep -n \"^## Phase\\\\|^---$\" /Users/emredonger/Desktop/ada_edit/EXPERIMENTS.md)"
-    ]
-  }
-}
