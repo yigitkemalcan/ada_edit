@@ -521,6 +521,88 @@ def best_kv_configs(
     return rows
 
 
+# ---------------------------------------------------------------------
+# Phase-15 sweep: progress_adaptive (v3) controller
+# ---------------------------------------------------------------------
+
+
+def progress_adaptive_configs() -> List[Dict[str, Any]]:
+    """
+    v3 progress_adaptive sweep: 8 configs.
+
+    Tests the new dual-signal controller that tracks preservation drift
+    AND edit velocity against per-step time-varying setpoints derived
+    from the source trajectory. The goal is to beat both `paper_adaedit`
+    and `pd_best` on all 9 metrics — closing the structural clip_t /
+    clip_dir gap that drift-only PD controllers can't close.
+
+    Setpoint shape:
+      target_pres_profile[i]   = beta * MSE(source_traj[i], z_init)
+                                 over preservation tokens
+      target_edit_velocity[i]  = scale * inject_weights[i] * mean(per-step
+                                 source preservation velocity)
+
+    Effective kv:
+      kv_eff = base_kv * alpha_pres * (1 - release_gain * alpha_release) * w(i)
+
+    Anchors:
+      - paper_adaedit
+      - pd_best (Phase-7/8 winner)
+
+    New variants (all use mode='progress_adaptive', kv=0.30, soft_mask
+    on, drift signal latent_relative for apples-to-apples per-step
+    comparison, edit signal edit_step for per-step velocity):
+      - pa_default          : β=1.0, release_gain=0.5, scale=1.0
+      - pa_pres_loose       : β=1.5 (tolerate more drift)
+      - pa_pres_tight       : β=0.7 (clamp harder on drift)
+      - pa_release_low      : release_gain=0.25 (small release)
+      - pa_release_high     : release_gain=0.8 (big release)
+      - pa_velocity_strong  : target_edit_velocity_scale=1.5
+                              (demand more edit velocity)
+    """
+    _PA_BASE: Dict[str, Any] = dict(
+        mode="progress_adaptive",
+        kv_mix_ratio=0.30,
+        ls_ratio=0.45,
+        kp_p=1.5,
+        kd_p=0.2,
+        kp_release=1.0,
+        kd_release=0.1,
+        release_pres_slack=0.0,
+        use_soft_mask=True,
+        drift_metric="latent_relative",
+        progress_edit_drift_metric="edit_step",
+        combine="multiply",
+        target_pres_beta=1.0,
+        target_edit_velocity_scale=1.0,
+        release_gain=0.5,
+    )
+
+    def _pa(name, **over):
+        cfg = dict(_PA_BASE)
+        cfg.update(over)
+        cfg["name"] = name
+        return cfg
+
+    return [
+        # Anchors
+        {"name": "paper_adaedit",
+         "mode": "original",
+         "kv_mix_ratio": 0.9,
+         "ls_ratio": 0.25,
+         **_EXT_ON},
+        {"name": "pd_best", **_PD_BEST},
+
+        # New v3 variants
+        _pa("pa_default"),
+        _pa("pa_pres_loose", target_pres_beta=1.5),
+        _pa("pa_pres_tight", target_pres_beta=0.7),
+        _pa("pa_release_low", release_gain=0.25),
+        _pa("pa_release_high", release_gain=0.8),
+        _pa("pa_velocity_strong", target_edit_velocity_scale=1.5),
+    ]
+
+
 def calibrate_drift_signals(
     *,
     t5, clip, model, ae,
@@ -663,6 +745,13 @@ def _cfg_knobs(cfg: Dict[str, Any]) -> Dict[str, Any]:
         "td_high":         cfg.get("td_high", ""),
         "td_low":          cfg.get("td_low", ""),
         "release_factor":  cfg.get("release_factor", ""),
+        # v3 progress_adaptive
+        "target_pres_beta": cfg.get("target_pres_beta", ""),
+        "target_edit_velocity_scale": cfg.get("target_edit_velocity_scale", ""),
+        "release_gain":    cfg.get("release_gain", ""),
+        "kp_release":      cfg.get("kp_release", ""),
+        "kd_release":      cfg.get("kd_release", ""),
+        "progress_edit_drift_metric": cfg.get("progress_edit_drift_metric", ""),
     }
 
 

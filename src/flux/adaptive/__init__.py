@@ -16,16 +16,20 @@ scheduled_target, xattn_boost.
 from .controller import PDController, PIDController, make_controller
 from .controller_v2 import (
     DualObjectiveController,
+    ProgressAdaptiveController,
     ScheduledTargetController,
     V2_MODES,
+    V3_MODES,
     make_controller_v2,
 )
 from .drift import DriftMeter, compute_drift
 from .drift_v2 import EditProgressMeter
 from .sampling_adaptive import denoise_fireflow_adaptive
 from .sampling_adaptive_v2 import (
+    compute_progress_profiles,
     denoise_fireflow_asymmetric,
     denoise_fireflow_dual,
+    denoise_fireflow_progress_adaptive,
     denoise_fireflow_scheduled,
     denoise_fireflow_two_phase,
     denoise_fireflow_xattn,
@@ -41,12 +45,16 @@ __all__ = [
     "denoise_fireflow_adaptive",
     # v2
     "DualObjectiveController",
+    "ProgressAdaptiveController",
     "ScheduledTargetController",
     "V2_MODES",
+    "V3_MODES",
     "make_controller_v2",
     "EditProgressMeter",
+    "compute_progress_profiles",
     "denoise_fireflow_asymmetric",
     "denoise_fireflow_dual",
+    "denoise_fireflow_progress_adaptive",
     "denoise_fireflow_scheduled",
     "denoise_fireflow_two_phase",
     "denoise_fireflow_xattn",

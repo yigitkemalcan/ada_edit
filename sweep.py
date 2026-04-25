@@ -160,6 +160,14 @@ def _build_args(
         ("xattn_release_threshold", "--xattn_release_threshold"),
         ("release_factor",  "--release_factor"),
         ("channel_ls_temp", "--channel_ls_temp"),
+        # v3 progress_adaptive
+        ("target_pres_beta", "--target_pres_beta"),
+        ("target_edit_velocity_scale", "--target_edit_velocity_scale"),
+        ("release_gain",    "--release_gain"),
+        ("kp_release",      "--kp_release"),
+        ("kd_release",      "--kd_release"),
+        ("release_pres_slack", "--release_pres_slack"),
+        ("progress_edit_drift_metric", "--progress_edit_drift_metric"),
     ]:
         if k in cfg:
             cli += [flag, str(cfg[k])]

@@ -1157,6 +1157,283 @@ trades down ~0.005 in exchange for +2.33 dB PSNR and +0.08 LPIPS.
 
 ---
 
+## Phase 13 — best-of-all-worlds × kv sweep (n=20, 10 configs)
+
+Stacks the orthogonal winners from prior phases and sweeps
+`kv_mix_ratio` to locate the Pareto point that best closes on
+`paper_adaedit`.
+
+**The "best" stack** (`_BEST_BASE` in `sweep_pie_bench.py`):
+- Phase 7/8: `soft_mask=True`, `channel_ls=False`, `adaptive_kv=False`
+- Phase 11: `drift_metric = latent_init_p90`
+- Phase 12: `combine = "replace"` (full adaptive)
+- Phase 13: sweep `kv_mix_ratio ∈ {0.30, 0.40, 0.50, 0.60, 0.75, 0.90}`
+
+`target_drift` recalibrated per-kv via `calibrate_drift_signals(base_cfg=...)`.
+Optional `dual_objective` rows added at kv=0.30 and 0.60.
+
+Driver: `sweep_pie_bench.py::best_kv_configs()`.
+
+### Results
+
+```
+name              time_min  n_ok  psnr     ssim    lpips   psnr_bg  ssim_bg  lpips_bg  clip_i  clip_t  clip_dir
+----------------  --------  ----  -------  ------  ------  -------  -------  --------  ------  ------  --------
+paper_adaedit     4.06      20    17.6692  0.6033  0.4029  20.5426  0.7011   0.1754    0.8938  0.2746  0.1397
+pd_best           4.05      20    20.1062  0.6690  0.3169  22.2286  0.7313   0.1515    0.9091  0.2670  0.1387
+best_kv0.30       4.07      20    20.0442  0.6660  0.3216  22.0384  0.7257   0.1525    0.9062  0.2694  0.1430
+best_kv0.40       4.09      20    19.9048  0.6635  0.3240  21.9353  0.7236   0.1546    0.9028  0.2682  0.1401
+best_kv0.50       4.08      20    19.7227  0.6592  0.3294  21.8165  0.7238   0.1546    0.9012  0.2690  0.1452
+best_kv0.60       4.06      20    19.4866  0.6568  0.3370  21.6512  0.7207   0.1557    0.8956  0.2686  0.1420
+best_kv0.75       4.06      20    18.7211  0.6320  0.3671  21.2925  0.7101   0.1628    0.8928  0.2732  0.1372
+best_kv0.90       4.07      20    18.3560  0.6225  0.3797  21.0458  0.7051   0.1673    0.8961  0.2736  0.1421
+best_dual_kv0.30  4.08      20    19.9515  0.6651  0.3235  21.9944  0.7270   0.1536    0.9048  0.2694  0.1392
+best_dual_kv0.60  4.10      20    18.6866  0.6354  0.3640  21.3758  0.7144   0.1610    0.8916  0.2727  0.1416
+```
+
+Best per metric: `pd_best` 7, `paper_adaedit` 1 (clip_t), `best_kv0.50` 1 (clip_dir).
+
+### Pareto picture
+
+Across the 6 best-stack rows, `kv_mix_ratio` traces a monotone
+fidelity → clip_t trade-off, exactly as Phase 12 predicted:
+
+| kv | psnr | clip_t | clip_dir |
+|----|------|--------|----------|
+| 0.30 | **20.04** | 0.2694 | 0.1430 |
+| 0.40 | 19.90 | 0.2682 | 0.1401 |
+| 0.50 | 19.72 | 0.2690 | **0.1452** |
+| 0.60 | 19.49 | 0.2686 | 0.1420 |
+| 0.75 | 18.72 | 0.2732 | 0.1372 |
+| 0.90 | 18.36 | **0.2736** | 0.1421 |
+
+PSNR drops ~1.7 dB from kv=0.30 to kv=0.90; clip_t rises ~+0.004.
+clip_t never quite catches `paper_adaedit` (0.2746 vs 0.2736 at kv=0.90) —
+even at matched kv the PD controller + replace combine trades ~0.001
+of text alignment for everything else. clip_dir peaks at **kv=0.50**
+(non-monotonic), not at the extremes.
+
+### vs. `paper_adaedit` (the headline table)
+
+`best_kv0.30` beats `paper_adaedit` on 8 of 9 metrics — the best
+showing of any phase so far:
+
+|          | paper_adaedit | **best_kv0.30** | Δ |
+|----------|---------------|-----------------|---|
+| psnr     | 17.6692 | **20.0442** | +2.38 dB |
+| ssim     | 0.6033  | **0.6660**  | +0.063 |
+| lpips    | 0.4029  | **0.3216**  | −0.081 |
+| psnr_bg  | 20.5426 | **22.0384** | +1.50 dB |
+| ssim_bg  | 0.7011  | **0.7257**  | +0.025 |
+| lpips_bg | 0.1754  | **0.1525**  | −0.023 |
+| clip_i   | 0.8938  | **0.9062**  | +0.012 |
+| **clip_t** | **0.2746** | 0.2694  | **−0.0052** |
+| clip_dir | 0.1397  | **0.1430**  | +0.003 |
+
+The lone loss on clip_t is the structural gap called out in Phase 12
+and confirmed here — closing it requires a kv that gives up most of
+the PSNR margin.
+
+### vs. `pd_best` (the within-family table)
+
+Within our own family, `pd_best` still wins 7/9. The stack traded
+small amounts of every fidelity metric for small amounts of clip_t /
+clip_dir:
+
+|          | pd_best | best_kv0.30 | Δ |
+|----------|---------|-------------|---|
+| psnr     | **20.1062** | 20.0442 | −0.06 dB |
+| ssim     | **0.6690** | 0.6660 | −0.003 |
+| lpips    | **0.3169** | 0.3216 | +0.005 |
+| psnr_bg  | **22.2286** | 22.0384 | −0.19 dB |
+| ssim_bg  | **0.7313** | 0.7257 | −0.006 |
+| lpips_bg | **0.1515** | 0.1525 | +0.001 |
+| clip_i   | **0.9091** | 0.9062 | −0.003 |
+| clip_t   | 0.2670  | **0.2694** | +0.002 |
+| clip_dir | 0.1387  | **0.1430** | +0.004 |
+
+So the orthogonal stacking hypothesis is only half right: **p90 +
+replace gains stacked for edit signal but did not stack for
+fidelity**. Each element individually (Phase 11 +0.055 dB p90; Phase
+12 −0.1 dB replace) roughly predicts the net −0.06 dB observed here.
+The clip_t and clip_dir gains are real but modest.
+
+### dual_objective didn't help
+
+The Phase-9 `dual_r3` advantage did not survive the new stack:
+
+|                  | best_kv0.30 | best_dual_kv0.30 | Δ |
+|------------------|-------------|------------------|---|
+| psnr             | **20.0442** | 19.9515          | −0.09 dB |
+| clip_t           | 0.2694      | 0.2694           | 0 |
+| clip_dir         | **0.1430**  | 0.1392           | −0.004 |
+
+|                  | best_kv0.60 | best_dual_kv0.60 | Δ |
+|------------------|-------------|------------------|---|
+| psnr             | **19.4866** | 18.6866          | −0.80 dB |
+| clip_t           | 0.2686      | **0.2727**       | +0.004 |
+| clip_dir         | **0.1420**  | 0.1416           | −0.000 |
+
+Plausible reason: in Phase 9 `dual_r3`'s advantage came from driving
+edit-region dynamics on top of the sigmoid envelope. With
+`combine="replace"` the sigmoid is gone and the single PD loop
+already owns the full trajectory; adding a second controller mostly
+destabilizes at a fixed total budget.
+
+### Takeaways
+
+1. **`best_kv0.30` is the best row to report vs AdaEdit** — 8/9 wins,
+   clean direction on every preservation metric, only loses clip_t by
+   0.0052. That is the strongest head-to-head we've produced.
+2. **`pd_best` remains the fidelity winner** within the PD family at
+   n=20. Phase-11/12/13 extensions helped edit signal but cost small
+   amounts of PSNR / SSIM / LPIPS / CLIP-I. The orthogonal-stacking
+   hypothesis (each win stacks independently) holds for clip_t and
+   clip_dir but not for fidelity.
+3. **The clip_t gap is structural at ~0.005** — even `best_kv0.90`
+   (which matches paper's kv) cannot close it, and running at that
+   kv costs 1.7 dB PSNR. The gap is a property of the PD controller
+   under replace combine, not a kv issue.
+4. **clip_dir peaks at kv=0.50**, suggesting the PD family's
+   directional-edit sweet spot is higher than the fidelity-optimal
+   kv=0.30. Worth revisiting if clip_dir is the primary target.
+5. **`dual_objective` is no longer worth carrying.** The Phase-9
+   advantage was kv-mode- and combine-mode-specific and does not
+   generalize to the new stack.
+
+### Recommended reporting posture
+
+Two defensible narratives, pick one:
+
+- **"Beat AdaEdit on everything but text alignment"** → report
+  `best_kv0.30` (8/9 wins, +2.38 dB PSNR, −0.005 clip_t). The
+  single-metric loss is small and the fidelity case is dominant.
+- **"Beat AdaEdit on fidelity"** → report `pd_best` (7/9 vs
+  AdaEdit incl. clip_i, loses clip_t and clip_dir narrowly). Phase 8
+  already has the full-700 numbers on this config.
+
+If aiming for the 8/9 story, the next step is a full-700 replay of
+`best_kv0.30` to confirm the n=20 margins hold — and to get a
+paper-ready number.
+
+---
+
+## Phase 14 — full PIE-Bench validation of `best_kv0.30` (n=688/700)
+
+Phase 13's `best_kv0.30` (the p90 + replace stack at kv=0.30) won 8/9
+vs `paper_adaedit` at n=20. This phase replays the same config on the
+full 700-sample slice — same protocol as Phase 8 — to check whether
+the n=20 advantage holds at scale.
+
+Configs: 3 rows on the same slice (688/700 after 12 shared failures).
+- `paper_adaedit` — AdaEdit baseline (kv=0.9, all extensions on)
+- `pd_best`       — Phase-7/8 winner (kv=0.30, latent_init, multiply)
+- `best_kv0.30`   — Phase-13 stack (kv=0.30, **latent_init_p90, replace**)
+
+Per-config runtime: ~140 min × 3 = ~7 hr.
+
+### Global means
+
+```
+name           n_ok  psnr     ssim    lpips   psnr_bg  ssim_bg  lpips_bg  clip_i  clip_t  clip_dir
+-------------  ----  -------  ------  ------  -------  -------  --------  ------  ------  --------
+paper_adaedit  688   18.5723  0.6666  0.3447  20.7781  0.7098   0.2024    0.8701  0.2595  0.1003
+pd_best        688   20.8173  0.7174  0.2835  22.1971  0.7324   0.1816    0.8891  0.2516  0.0750
+best_kv0.30    688   20.7382  0.7157  0.2854  22.1304  0.7310   0.1825    0.8885  0.2520  0.0777
+```
+
+Best per metric: `pd_best` 7, `paper_adaedit` 2 (clip_t, clip_dir).
+`best_kv0.30` wins zero outright.
+
+### vs. `paper_adaedit`
+
+`best_kv0.30` wins 7 of 9 vs paper — **the same count as `pd_best`**.
+
+|          | paper_adaedit | best_kv0.30 | Δ |
+|----------|---------------|-------------|---|
+| psnr     | 18.5723 | **20.7382** | +2.17 dB |
+| ssim     | 0.6666  | **0.7157**  | +0.049 |
+| lpips    | 0.3447  | **0.2854**  | −0.059 |
+| psnr_bg  | 20.7781 | **22.1304** | +1.35 dB |
+| ssim_bg  | 0.7098  | **0.7310**  | +0.021 |
+| lpips_bg | 0.2024  | **0.1825**  | −0.020 |
+| clip_i   | 0.8701  | **0.8885**  | +0.018 |
+| **clip_t**   | **0.2595** | 0.2520 | −0.0075 |
+| **clip_dir** | **0.1003** | 0.0777 | −0.0226 |
+
+The Phase-13 n=20 result was 8/9 (only clip_t lost). At n=688 it
+becomes 7/9 — clip_dir flips to a loss. Both gaps to paper are
+**larger on full-700 than they were at n=20**:
+
+| Gap to paper | n=20 (Phase 13) | n=688 (Phase 14) |
+|--------------|-----------------|-------------------|
+| clip_t Δ     | −0.0052          | −0.0075          |
+| clip_dir Δ   | **+0.0033** (win) | **−0.0226** (loss) |
+
+The n=20 clip_dir win was sample-noise. At full scale `paper_adaedit`'s
++0.025 clip_dir advantage is the same structural trade-off Phase 8
+flagged for `pd_best` (−0.025 clip_dir), unchanged by the new stack.
+
+### vs. `pd_best`
+
+The within-family comparison from Phase 13 holds at scale, just at
+even smaller margins:
+
+|          | pd_best | best_kv0.30 | Δ |
+|----------|---------|-------------|---|
+| psnr     | **20.8173** | 20.7382 | −0.08 dB |
+| ssim     | **0.7174** | 0.7157  | −0.002 |
+| lpips    | **0.2835** | 0.2854  | +0.002 |
+| psnr_bg  | **22.1971** | 22.1304 | −0.07 dB |
+| ssim_bg  | **0.7324** | 0.7310  | −0.001 |
+| lpips_bg | **0.1816** | 0.1825  | +0.001 |
+| clip_i   | **0.8891** | 0.8885  | −0.001 |
+| clip_t   | 0.2516  | **0.2520** | +0.0004 |
+| clip_dir | 0.0750  | **0.0777** | +0.0027 |
+
+`best_kv0.30` trades a uniformly small fidelity loss for a tiny clip_t
+gain (+0.0004) and a small clip_dir gain (+0.0027). The trade is real
+but the magnitudes are at or below the noise floor of a single
+~140-min run on this slice.
+
+### Takeaways
+
+1. **`pd_best` remains the strongest single config.** Wins all 7
+   fidelity metrics at full scale; matches `best_kv0.30` on the
+   2-metric tail. There is no row from any of the post-Phase-8
+   experiments that beats it on fidelity at n=688.
+2. **The Phase-13 "8/9 win" did not generalize.** clip_dir flipped
+   from a +0.003 win at n=20 to a −0.023 loss at n=688. n=20 is too
+   small to detect clip_dir effects that Phase 8 already showed need
+   the full slice — that one's on us.
+3. **The orthogonal-stacking hypothesis is essentially neutral at
+   scale.** p90 + replace shifts edit metrics by ~0.001 / +0.003 and
+   costs ~0.08 dB PSNR. It is a slice along the same Pareto frontier
+   `pd_best` already sits on, not a movement of the frontier.
+4. **The clip_t / clip_dir structural gap is the binding constraint.**
+   Every PD-family config at kv=0.30 is within 0.005 of the others on
+   text-alignment metrics; the −0.008 / −0.023 deltas to `paper_adaedit`
+   are properties of running PD at low kv, not of the drift signal or
+   combine mode.
+
+### Recommended paper headline
+
+**Report `pd_best` as the headline result** (Phase 8 numbers, already
+on full 700): 7/9 wins vs `paper_adaedit`, +2.25 dB PSNR, with an
+honest disclosure of the clip_t (−0.008) and clip_dir (−0.025)
+tradeoffs. `best_kv0.30` does not earn its own row in the paper; the
+Phase-13/14 experiments are useful as ablation evidence (drift signal
+and combine mode are roughly Pareto-equivalent at this operating
+point) but not as a new headline number.
+
+If a future direction is needed to close clip_dir, it will not come
+from the drift-signal / combine-mode axes Phases 11–14 explored.
+A different hypothesis is required (likely on the controller side or
+via a higher-kv operating point with explicit edit-direction
+regularization).
+
+---
+
 ## Next step
 
 1. **kv trade-off sweep on full 700 (optional).** n=30 showed

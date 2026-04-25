@@ -53,11 +53,14 @@ from src.flux.adaptive import (
     DriftMeter,
     EditProgressMeter,
     V2_MODES,
+    V3_MODES,
+    compute_progress_profiles,
     denoise_fireflow_adaptive,
     dispatch_v2_sampler,
     make_controller,
     make_controller_v2,
 )
+from src.flux.sampling import get_progressive_inject_schedule
 
 NSFW_THRESHOLD = 0.85
 ADAPTIVE_MODES_V1 = (
@@ -68,7 +71,7 @@ ADAPTIVE_MODES_V1 = (
     "pid_adaptive",
     "no_injection",
 )
-ADAPTIVE_MODES = ADAPTIVE_MODES_V1 + V2_MODES
+ADAPTIVE_MODES = ADAPTIVE_MODES_V1 + V2_MODES + V3_MODES
 
 
 @torch.inference_mode()
@@ -208,8 +211,9 @@ def run(args, *, t5=None, clip=None, model=None, ae=None, gt_mask=None):
 
     # --- Phase 1: inversion (original path) -------------------------
     # Cache per-step latents only when the drift signal needs them.
-    info["record_source_trajectory"] = args.drift_metric in (
-        "latent_relative", "latent_relative_cosine",
+    info["record_source_trajectory"] = (
+        args.drift_metric in ("latent_relative", "latent_relative_cosine")
+        or args.mode == "progress_adaptive"
     )
     print("Phase 1: Inverting source image (original AdaEdit path)...")
     z_inv, info = denoise_fireflow(
@@ -239,7 +243,41 @@ def run(args, *, t5=None, clip=None, model=None, ae=None, gt_mask=None):
 
     # --- Phase 3: target pass ---------------------------------------
     is_v2 = args.mode in V2_MODES
-    if is_v2:
+    is_v3 = args.mode in V3_MODES
+    if is_v3 and args.mode == "progress_adaptive":
+        # Build per-step setpoint profiles from the cached source
+        # trajectory so the controller knows what "natural" preservation
+        # drift and per-step latent velocity look like at each step.
+        progress_inject_weights = get_progressive_inject_schedule(
+            args.num_steps, args.inject, args.inject_schedule,
+        )
+        indices_for_profile = info.get("indices", None)
+        if not torch.is_tensor(indices_for_profile):
+            indices_for_profile = None
+        target_pres_profile, target_edit_velocity_profile = compute_progress_profiles(
+            z_init=z_inv.clone(),
+            source_traj=info.get("source_trajectory", None),
+            indices=indices_for_profile,
+            soft_mask=info.get("soft_mask", None),
+            inject_weights=progress_inject_weights,
+            target_pres_beta=args.target_pres_beta,
+            target_edit_velocity_scale=args.target_edit_velocity_scale,
+        )
+        controller = make_controller_v2(
+            args.mode,
+            num_steps=args.num_steps,
+            base_alpha=args.base_alpha,
+            alpha_min=args.alpha_min,
+            alpha_max=args.alpha_max,
+            kp_p=args.kp_p, kd_p=args.kd_p,
+            clip_pres_below_zero=args.clip_pres_below_zero,
+            target_pres_profile=target_pres_profile,
+            target_edit_velocity_profile=target_edit_velocity_profile,
+            kp_release=args.kp_release,
+            kd_release=args.kd_release,
+            release_pres_slack=args.release_pres_slack,
+        )
+    elif is_v2:
         controller = make_controller_v2(
             args.mode,
             num_steps=args.num_steps,
@@ -282,9 +320,10 @@ def run(args, *, t5=None, clip=None, model=None, ae=None, gt_mask=None):
         )
         info["kv_mix"] = prev_kv_mix
         info.setdefault("adaptive_log", [])
-    elif is_v2:
+    elif is_v2 or is_v3:
+        variant_label = "v3" if is_v3 else "v2"
         print(
-            f"Phase 3: target pass — mode={args.mode} (v2 sampler, "
+            f"Phase 3: target pass — mode={args.mode} ({variant_label} sampler, "
             f"drift={args.drift_metric}, combine={args.combine})"
         )
         sampler = dispatch_v2_sampler(args.mode)
@@ -299,7 +338,14 @@ def run(args, *, t5=None, clip=None, model=None, ae=None, gt_mask=None):
             combine=args.combine,
             guidance=args.guidance,
         )
-        if args.mode == "dual_objective":
+        if args.mode == "progress_adaptive":
+            edit_meter = EditProgressMeter(mode=args.progress_edit_drift_metric)
+            x_out, info = sampler(
+                edit_meter=edit_meter,
+                release_gain=args.release_gain,
+                **common_kwargs,
+            )
+        elif args.mode == "dual_objective":
             edit_meter = EditProgressMeter(mode=args.edit_drift_metric)
             x_out, info = sampler(edit_meter=edit_meter, **common_kwargs)
         elif args.mode == "two_phase_switch":
@@ -572,6 +618,36 @@ def build_parser():
                    help="v2 xattn_boost: error threshold that triggers release")
     p.add_argument("--release_factor", default=0.7, type=float,
                    help="v2 xattn_boost: alpha scale when under-attending")
+
+    # --- v3 adaptive controls (progress_adaptive) ---
+    p.add_argument("--target_pres_beta", default=1.0, type=float,
+                   help="v3 progress_adaptive: scale on per-step source "
+                        "preservation drift profile (target_pres[i] = "
+                        "beta * source_drift[i])")
+    p.add_argument("--target_edit_velocity_scale", default=1.0, type=float,
+                   help="v3 progress_adaptive: scale on per-step edit "
+                        "velocity setpoint (target_edit_v[i] = scale * "
+                        "inject_weights[i] * mean_step_velocity)")
+    p.add_argument("--release_gain", default=0.5, type=float,
+                   help="v3 progress_adaptive: max kv release applied at "
+                        "alpha_release=1 (kv_eff multiplied by "
+                        "(1 - release_gain * alpha_release))")
+    p.add_argument("--kp_release", default=1.0, type=float,
+                   help="v3 progress_adaptive: proportional gain on "
+                        "edit-velocity error in release branch")
+    p.add_argument("--kd_release", default=0.1, type=float,
+                   help="v3 progress_adaptive: derivative gain on "
+                        "edit-velocity error in release branch")
+    p.add_argument("--release_pres_slack", default=0.0, type=float,
+                   help="v3 progress_adaptive: e_pres threshold below "
+                        "which release is allowed to fire (0 = only "
+                        "release when at-or-below preservation target)")
+    p.add_argument("--progress_edit_drift_metric", default="edit_step",
+                   type=str,
+                   choices=["edit_init", "edit_step", "edit_init_soft",
+                            "edit_normalized"],
+                   help="v3 progress_adaptive: edit-side meter "
+                        "(edit_step recommended — per-step velocity)")
 
     # logging / metrics
     p.add_argument("--log_controller", action="store_true", default=True,

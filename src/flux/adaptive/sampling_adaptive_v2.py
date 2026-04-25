@@ -45,9 +45,10 @@ from ..sampling import get_progressive_inject_schedule
 from .controller import PDController
 from .controller_v2 import (
     DualObjectiveController,
+    ProgressAdaptiveController,
     ScheduledTargetController,
 )
-from .drift import DriftMeter
+from .drift import DriftMeter, _masked_mse, _preservation_mask
 from .drift_v2 import EditProgressMeter
 from .sampling_adaptive import _effective_kv_ratio
 
@@ -563,6 +564,192 @@ def denoise_fireflow_xattn(
 
 
 # -----------------------------------------------------------------------------
+# Variant F (v3) — progress_adaptive
+# -----------------------------------------------------------------------------
+
+
+def compute_progress_profiles(
+    *,
+    z_init: Tensor,
+    source_traj: Optional[List[Tensor]],
+    indices,
+    soft_mask,
+    inject_weights: List[float],
+    target_pres_beta: float = 1.0,
+    target_edit_velocity_scale: float = 1.0,
+) -> tuple:
+    """
+    Build per-step setpoint arrays for ProgressAdaptiveController.
+
+    target_pres_profile[i] = beta * MSE(source_traj[i], z_init) on
+        preservation tokens. Captures the natural per-step drift
+        envelope of a no-edit pass; controller pushes alpha up only
+        when the actual drift exceeds this envelope by a margin set
+        by ``target_pres_beta``.
+
+    target_edit_velocity_profile[i] = scale * inject_weights[i] *
+        mean(per-step preservation velocity). Bell-shaped under a
+        sigmoid inject schedule. The velocity reference is computed
+        from the source trajectory's per-step deltas — this gives a
+        natural magnitude scale for "how much the latent moves per
+        step" at this noise level, which we then ask the edit region
+        to match (or exceed by ``target_edit_velocity_scale``).
+
+    If source_traj is None or too short, falls back to a constant
+    profile sized to ``inject_weights`` length using a small default
+    so the controller still runs (degraded mode — equivalent to
+    fixed setpoints).
+    """
+    n = len(inject_weights)
+    if source_traj is None or len(source_traj) == 0:
+        target_pres_profile = [0.02 * target_pres_beta] * n
+        target_edit_velocity_profile = [
+            0.01 * target_edit_velocity_scale * float(w) for w in inject_weights
+        ]
+        return target_pres_profile, target_edit_velocity_profile
+
+    seq_len = z_init.shape[1]
+    mask = _preservation_mask(seq_len, z_init.device, torch.float32, indices, soft_mask)
+
+    pres_drift_profile: List[float] = []
+    pres_velocity_profile: List[float] = []
+    prev = None
+    for i in range(n):
+        idx = max(0, min(i, len(source_traj) - 1))
+        s_i = source_traj[idx]
+        pres_drift_profile.append(float(_masked_mse(s_i, z_init, mask)))
+        if prev is None:
+            pres_velocity_profile.append(0.0)
+        else:
+            pres_velocity_profile.append(float(_masked_mse(s_i, prev, mask)))
+        prev = s_i
+
+    # Mean step velocity over steps where injection is active — anchors
+    # the edit-velocity scale to the active-injection regime.
+    active_velocities = [
+        v for v, w in zip(pres_velocity_profile, inject_weights)
+        if float(w) > 0.05 and v > 0.0
+    ]
+    if active_velocities:
+        v_ref = sum(active_velocities) / len(active_velocities)
+    else:
+        v_ref = max(pres_velocity_profile) if pres_velocity_profile else 0.01
+        if v_ref <= 0.0:
+            v_ref = 0.01
+
+    target_pres_profile = [target_pres_beta * d for d in pres_drift_profile]
+    target_edit_velocity_profile = [
+        target_edit_velocity_scale * float(w) * v_ref for w in inject_weights
+    ]
+    return target_pres_profile, target_edit_velocity_profile
+
+
+@torch.inference_mode()
+def denoise_fireflow_progress_adaptive(
+    model: Flux,
+    img: Tensor,
+    img_ids: Tensor,
+    txt: Tensor,
+    txt_ids: Tensor,
+    vec: Tensor,
+    timesteps: List[float],
+    info: dict,
+    *,
+    z_init: Tensor,
+    controller: ProgressAdaptiveController,
+    drift_meter: DriftMeter,
+    edit_meter: EditProgressMeter,
+    combine: str = "multiply",
+    guidance: float = 4.0,
+    release_gain: float = 0.5,
+):
+    """
+    v3 — Progress-Aware Adaptive Controller.
+
+    Reads two signals per step:
+      - drift_pres from DriftMeter (preservation drift, e.g.
+        latent_relative or latent_init).
+      - edit_velocity from EditProgressMeter (edit_step mode, per-step
+        movement in edit region).
+
+    Controller emits (alpha_pres, alpha_release). Effective kv is
+
+        kv_eff = base_kv * alpha_pres * (1 - release_gain * alpha_release)
+                 then * w(i) if combine='multiply'.
+
+    With release_gain=0 the variant collapses to a vanilla PD on
+    preservation drift against a per-step setpoint (pure schedule
+    behavior). With release_gain>0 and edit progress lagging the
+    setpoint, the schedule is partially released, giving the model
+    more freedom to develop the edit at exactly the moments when it
+    needs it — and only when preservation has slack to spare.
+    """
+    num_steps = len(timesteps[:-1])
+    inject_weights, base_kv, indices, soft_mask, source_traj = _prep_step_common(info, num_steps)
+    guidance_vec = torch.full(
+        (img.shape[0],), guidance, device=img.device, dtype=img.dtype
+    )
+
+    controller.reset()
+    drift_meter.reset()
+    edit_meter.reset()
+    adaptive_log = []
+    next_step_velocity = None
+
+    for i, (t_curr, t_prev) in enumerate(zip(timesteps[:-1], timesteps[1:])):
+        d_pres = drift_meter.update(
+            img=img, z_init=z_init, indices=indices, soft_mask=soft_mask,
+            step_idx=i, source_traj=source_traj,
+        )
+        edit_v = edit_meter.update(
+            img=img, z_init=z_init, indices=indices, soft_mask=soft_mask,
+            preservation_drift=d_pres,
+        )
+        alpha_pres, alpha_release = controller.step(d_pres, edit_v, step_idx=i)
+
+        w_i = float(inject_weights[i])
+        kv_pres = _effective_kv_ratio(base_kv, alpha_pres, w_i, combine)
+        release_factor = 1.0 - release_gain * alpha_release
+        if release_factor < 0.0:
+            release_factor = 0.0
+        kv_eff = kv_pres * release_factor
+        if kv_eff > 1.0:
+            kv_eff = 1.0
+        info["kv_mix_ratio"] = kv_eff
+        info["inject"] = w_i > 0.05
+        info["inject_weight"] = w_i
+
+        img, info, next_step_velocity = _fireflow_inner_step(
+            model, img, t_curr, t_prev, img_ids, txt, txt_ids, vec,
+            guidance_vec, info, next_step_velocity,
+        )
+        adaptive_log.append({
+            "step": i,
+            "t_curr": float(t_curr),
+            "t_prev": float(t_prev),
+            "inject_weight": w_i,
+            "drift_pres": d_pres,
+            "edit_velocity": edit_v,
+            "target_pres_t": controller.target_pres_profile[
+                min(i, len(controller.target_pres_profile) - 1)
+            ],
+            "target_edit_v_t": controller.target_edit_velocity_profile[
+                min(i, len(controller.target_edit_velocity_profile) - 1)
+            ],
+            "alpha_pres": alpha_pres,
+            "alpha_release": alpha_release,
+            "release_factor": release_factor,
+            "kv_mix_ratio": info["kv_mix_ratio"],
+            "base_kv_mix_ratio": base_kv,
+            "variant": "progress_adaptive",
+        })
+
+    info["kv_mix_ratio"] = base_kv
+    info["adaptive_log"] = adaptive_log
+    return img, info
+
+
+# -----------------------------------------------------------------------------
 # Dispatcher
 # -----------------------------------------------------------------------------
 
@@ -579,4 +766,6 @@ def dispatch_v2_sampler(mode: str):
         return denoise_fireflow_scheduled
     if mode == "xattn_boost":
         return denoise_fireflow_xattn
+    if mode == "progress_adaptive":
+        return denoise_fireflow_progress_adaptive
     raise ValueError(f"dispatch_v2_sampler: unknown v2 mode {mode!r}")
