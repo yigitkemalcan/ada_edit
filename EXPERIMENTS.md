@@ -1448,3 +1448,50 @@ regularization).
    step count (we ran 15), mask/metric implementation, or slice
    differences. Only necessary if reviewers challenge the on-slice
    claim.
+
+---
+
+## Phase 15 — PA Cross-Config Sweep (2026-04-25, n=30)
+
+**Goal:** Compare 8 PA/PD configurations side-by-side on pie-bench (n=30 slice) to identify the best-performing PA variant and understand the effect of preservation and release/velocity tuning.
+
+### Raw results
+
+| name               | time_min | n_ok | psnr    | ssim   | lpips  | psnr_bg | ssim_bg | lpips_bg | clip_i | clip_t | clip_dir |
+|--------------------|----------|------|---------|--------|--------|---------|---------|----------|--------|--------|----------|
+| paper_adaedit      | 6.33     | 30   | 17.7045 | 0.6018 | 0.4016 | 20.4699 | 0.7072  | 0.1806   | 0.8870 | 0.2694 | 0.1280   |
+| pd_best            | 6.10     | 30   | 20.0393 | 0.6661 | 0.3219 | 22.1489 | 0.7355  | 0.1594   | 0.9021 | 0.2624 | 0.1209   |
+| pa_default         | 6.08     | 30   | 20.0925 | 0.6677 | 0.3188 | 22.2463 | 0.7364  | 0.1578   | 0.9029 | 0.2623 | 0.1194   |
+| pa_pres_loose      | 6.09     | 30   | 20.0925 | 0.6677 | 0.3188 | 22.2463 | 0.7364  | 0.1578   | 0.9029 | 0.2623 | 0.1194   |
+| pa_pres_tight      | 6.09     | 30   | 20.0787 | 0.6673 | 0.3191 | 22.1770 | 0.7359  | 0.1585   | 0.9028 | 0.2624 | 0.1207   |
+| pa_release_low     | 6.11     | 30   | 20.0650 | 0.6662 | 0.3201 | 22.1819 | 0.7343  | 0.1590   | 0.9028 | 0.2626 | 0.1224   |
+| pa_release_high    | 6.10     | 30   | 20.1149 | 0.6682 | 0.3172 | 22.3568 | 0.7374  | 0.1571   | 0.9041 | 0.2625 | 0.1212   |
+| pa_velocity_strong | 6.10     | 30   | 20.1141 | 0.6683 | 0.3179 | 22.3690 | 0.7377  | 0.1567   | 0.9041 | 0.2622 | 0.1219   |
+
+**Best per metric:**
+
+| metric    | winner             | value   |
+|-----------|--------------------|---------|
+| psnr ↑    | pa_release_high    | 20.1149 |
+| ssim ↑    | pa_velocity_strong | 0.6683  |
+| lpips ↓   | pa_release_high    | 0.3172  |
+| psnr_bg ↑ | pa_velocity_strong | 22.3690 |
+| ssim_bg ↑ | pa_velocity_strong | 0.7377  |
+| lpips_bg ↓| pa_velocity_strong | 0.1567  |
+| clip_i ↑  | pa_release_high    | 0.9041  |
+| clip_t ↑  | paper_adaedit      | 0.2694  |
+| clip_dir ↑| paper_adaedit      | 0.1280  |
+
+**Metric wins (out of 9):** `pa_velocity_strong` 4, `pa_release_high` 3, `paper_adaedit` 2.
+
+### Findings
+
+1. **`pa_default` and `pa_pres_loose` are identical.** Every metric matches to 4 decimal places — the loose preservation setting has no effect at this operating point.
+2. **`pa_release_high` and `pa_velocity_strong` are the top PA configs**, splitting 7 of 9 fidelity/edit metrics between them. Their scores are nearly tied: `pa_release_high` leads on PSNR (+0.0008) and LPIPS; `pa_velocity_strong` leads on all background metrics and SSIM.
+3. **All PA configs outperform `pd_best` on fidelity.** `pa_release_high` / `pa_velocity_strong` gain ~+0.07 dB PSNR, −0.005 LPIPS, and +0.2 dB PSNR_bg over `pd_best`, while running ~0 ms slower.
+4. **The clip_t / clip_dir gap persists.** `paper_adaedit` retains its 2-metric lead on text alignment (clip_t +0.007, clip_dir +0.006 vs best PA). This structural gap has been consistent across all phases and is not addressable via preservation or release tuning.
+5. **`pa_pres_tight` and `pa_release_low` are marginally weaker** than `pa_default` — tighter preservation and lower release slightly hurt background reconstruction without improving edit quality.
+
+### Takeaway
+
+`pa_release_high` and `pa_velocity_strong` are the strongest PA configurations found to date, each exceeding `pd_best` across fidelity metrics. Either is a viable headline configuration. The clip_t / clip_dir tradeoff vs `paper_adaedit` remains unchanged.
